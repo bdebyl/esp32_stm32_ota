@@ -11,12 +11,12 @@
 #include "stm32ota.h"
 
 /**
- * @brief Internal function to XOR all bytes in an STM32_LoadAddress_t
+ * @brief Internal function to XOR all bytes in an stm32_load_address_t
  *
  * @param load_address
  * @return char XOR of all bytes in load_address
  */
-static char _stm32_load_address_xor(STM32_LoadAddress_t *load_address) {
+static char _stm32_load_address_xor(stm32_load_address_t *load_address) {
   return load_address->high_byte ^ load_address->mid_high_byte ^
          load_address->mid_low_byte ^ load_address->low_byte;
 }
@@ -29,7 +29,7 @@ static char _stm32_load_address_xor(STM32_LoadAddress_t *load_address) {
  * @param expected_size
  * @return esp_err_t
  */
-static esp_err_t _stm32_await_rx(STM32_OTA_t *stm32_ota, size_t expected_size) {
+static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
   // Setup awaiting expected response size in the UART buffer prior to
   // continuing, this is a blocking call and could be improved later
   uint16_t timer = 0;
@@ -69,7 +69,7 @@ static esp_err_t _stm32_await_rx(STM32_OTA_t *stm32_ota, size_t expected_size) {
  * @param response_size
  * @return esp_err_t
  */
-static esp_err_t _stm32_write_bytes(STM32_OTA_t *stm32_ota,
+static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota,
                                     const char *write_bytes, size_t write_size,
                                     size_t response_size) {
   // Send initial UART data and ensure response size is what we expect
@@ -101,7 +101,7 @@ static esp_err_t _stm32_write_bytes(STM32_OTA_t *stm32_ota,
   return err;
 }
 
-esp_err_t stm32_init(STM32_OTA_t *stm32_ota) {
+esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
   // Check for null pointer
   if (stm32_ota == NULL)
     return ESP_ERR_INVALID_ARG;
@@ -141,7 +141,7 @@ esp_err_t stm32_init(STM32_OTA_t *stm32_ota) {
   return gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW);
 }
 
-esp_err_t stm32_reset(STM32_OTA_t *stm32_ota_t) {
+esp_err_t stm32_reset(stm32_ota_t *stm32_ota_t) {
   // TODO: don't use vTaskDelay which is a blocking call
   STM32_CHECK_ERROR(gpio_set_level(stm32_ota_t->stm_nrst_pin, STM32_LOW));
   vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -151,7 +151,7 @@ esp_err_t stm32_reset(STM32_OTA_t *stm32_ota_t) {
   return ESP_OK;
 }
 
-esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota) {
+esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // Set GPIO levels to being flashing STM32
   STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
   if (!stm32_ota->disable_boot1_pin)
@@ -213,7 +213,7 @@ esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota) {
   return ESP_OK;
 }
 
-esp_err_t stm32_ota_end(STM32_OTA_t *stm32_ota) {
+esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota) {
   STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_HIGH));
   if (!stm32_ota->disable_boot1_pin)
     STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_HIGH));
@@ -221,8 +221,8 @@ esp_err_t stm32_ota_end(STM32_OTA_t *stm32_ota) {
   return gpio_set_level(stm32_ota->stm_nrst_pin, STM32_HIGH);
 }
 
-esp_err_t stm32_ota_write_page(STM32_OTA_t *stm32_ota,
-                               STM32_LoadAddress_t *load_address,
+esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota,
+                               stm32_load_address_t *load_address,
                                const char *ota_data, size_t ota_data_size) {
   if (ota_data_size > STM32_MAX_PAGE_SIZE) {
     return ESP_ERR_INVALID_SIZE;
