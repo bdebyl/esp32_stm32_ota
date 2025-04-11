@@ -1,0 +1,7 @@
+AlignConsecutiveDeclarations: AcrossEmptyLines
+AlignConsecutiveAssignments: AcrossEmptyLines
+AlignConsecutiveMacros: AcrossEmptyLines
+ColumnLimit: 120
+BasedOnStyle: LLVM
+IndentWidth: 2
+SpacesBeforeTrailingComments: 2
