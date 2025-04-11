@@ -107,45 +107,45 @@ esp_err_t stm32_init(STM32_OTA_t *stm32_ota) {
     return ESP_ERR_INVALID_ARG;
 
   // Setup the UART driver
-  STM32_CHECK_ERROR(uart_driver_install(
+  STM32_ERROR_CHECK(uart_driver_install(
       stm32_ota->uart_port, stm32_ota->uart_rx_buffer_size,
       stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size,
       stm32_ota->uart_queue, stm32_ota->uart_intr_alloc_flags));
 
-  STM32_CHECK_ERROR(
+  STM32_ERROR_CHECK(
       uart_param_config(stm32_ota->uart_port, stm32_ota->uart_config));
 
-  STM32_CHECK_ERROR(uart_set_pin(stm32_ota->uart_port, stm32_ota->stm_tx_pin,
+  STM32_ERROR_CHECK(uart_set_pin(stm32_ota->uart_port, stm32_ota->stm_tx_pin,
                                  stm32_ota->stm_rx_pin, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
 
   // Setup GPIO pin for reset pin ~NRST
-  STM32_CHECK_ERROR(
+  STM32_ERROR_CHECK(
       gpio_set_direction(stm32_ota->stm_nrst_pin, GPIO_MODE_OUTPUT));
 
-  STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_nrst_pin, 1));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_nrst_pin, 1));
 
   // Setup GPIO pin for boot0 pin
-  STM32_CHECK_ERROR(
+  STM32_ERROR_CHECK(
       gpio_set_direction(stm32_ota->stm_boot0_pin, GPIO_MODE_OUTPUT));
 
-  STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
 
   if (stm32_ota->disable_boot1_pin) {
     return ESP_OK;
   }
 
   // Setup GPIO pin for boot1 pin if used
-  STM32_CHECK_ERROR(
+  STM32_ERROR_CHECK(
       gpio_set_direction(stm32_ota->stm_boot1_pin, GPIO_MODE_OUTPUT));
   return gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW);
 }
 
 esp_err_t stm32_reset(STM32_OTA_t *STM32_OTA_t) {
   // TODO: don't use vTaskDelay which is a blocking call
-  STM32_CHECK_ERROR(gpio_set_level(STM32_OTA_t->stm_nrst_pin, STM32_LOW));
+  STM32_ERROR_CHECK(gpio_set_level(STM32_OTA_t->stm_nrst_pin, STM32_LOW));
   vTaskDelay(100 / portTICK_PERIOD_MS);
-  STM32_CHECK_ERROR(gpio_set_level(STM32_OTA_t->stm_nrst_pin, STM32_HIGH));
+  STM32_ERROR_CHECK(gpio_set_level(STM32_OTA_t->stm_nrst_pin, STM32_HIGH));
   vTaskDelay(500 / portTICK_PERIOD_MS);
 
   return ESP_OK;
@@ -153,11 +153,11 @@ esp_err_t stm32_reset(STM32_OTA_t *STM32_OTA_t) {
 
 esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota) {
   // Set GPIO levels to being flashing STM32
-  STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
   if (!stm32_ota->disable_boot1_pin)
-    STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW));
+    STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW));
 
-  STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_nrst_pin, STM32_LOW));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_nrst_pin, STM32_LOW));
 
   // TODO: use non-blocking delay
   vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -214,9 +214,9 @@ esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota) {
 }
 
 esp_err_t stm32_ota_end(STM32_OTA_t *stm32_ota) {
-  STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_HIGH));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_HIGH));
   if (!stm32_ota->disable_boot1_pin)
-    STM32_CHECK_ERROR(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_HIGH));
+    STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_HIGH));
 
   return gpio_set_level(stm32_ota->stm_nrst_pin, STM32_HIGH);
 }
@@ -229,7 +229,7 @@ esp_err_t stm32_ota_write_page(STM32_OTA_t *stm32_ota,
   }
 
   char cmd_write[] = {0x31, 0xCE};
-  STM32_CHECK_ERROR(_stm32_write_bytes(stm32_ota->uart_port, cmd_write, 2, 1));
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota->uart_port, cmd_write, 2, 1));
 
   // Send the load address with the last byte being an XOR of all bytes combined
   char cmd_load_address[] = {
@@ -239,7 +239,7 @@ esp_err_t stm32_ota_write_page(STM32_OTA_t *stm32_ota,
       load_address->low_byte,
       _stm32_load_address_xor(load_address),
   };
-  STM32_CHECK_ERROR(
+  STM32_ERROR_CHECK(
       _stm32_write_bytes(stm32_ota->uart_port, cmd_load_address, 5, 1));
 
   // Send the size of the data to be written

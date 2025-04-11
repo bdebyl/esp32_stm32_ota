@@ -19,7 +19,7 @@
 
 #define STM32_MAX_PAGE_SIZE (0xFF)
 
-#define STM32_CHECK_ERROR(func)                                                                                        \
+#define STM32_ERROR_CHECK(func)                                                                                        \
   {                                                                                                                    \
     esp_err_t err = func;                                                                                              \
     if (err != ESP_OK) {                                                                                               \
