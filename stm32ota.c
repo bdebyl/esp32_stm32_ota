@@ -171,7 +171,7 @@ esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota) {
 
   // 1. Initial bootloader command
   char cmd_bootloader[] = {0x7F};
-  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota->uart_port, cmd_sync, 1, 1));
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota->uart_port, cmd_bootloader, 1, 1));
 
   // 2. Run the Get command and validate we got expected response size
   // TODO: do something with response information
