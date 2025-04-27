@@ -8,8 +8,8 @@
  * @copyright Copyright (c) 2025
  *
  */
-#ifndef __STM32_OTA_H
-#define __STM32_OTA_H
+#ifndef __stm32_ota_H
+#define __stm32_ota_H
 
 #define STM32_HIGH          (1)
 #define STM32_LOW           (0)
@@ -37,7 +37,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
-typedef struct _STM32_OTA_t {
+typedef struct _stm32_ota_t {
   QueueHandle_t *uart_queue;             // Uart event queue handle, if set to NULL driver
                                          // will not use a queue (ex. NULL)
   gpio_num_t     stm_boot0_pin;          // ESP pin connected to BOOT0 of STM32
@@ -52,14 +52,14 @@ typedef struct _STM32_OTA_t {
   uart_config_t *uart_config;            // UART config
   uart_port_t    uart_port;              // UART port of the ESP to use
   uint8_t        disable_boot1_pin;      // Set to 1 if not using boot1_pin
-} STM32_OTA_t;
+} stm32_ota_t;
 
-typedef struct _STM32_LoadAddress_t {
+typedef struct _stm32_loadaddress_t {
   char high_byte;
   char mid_high_byte;
   char mid_low_byte;
   char low_byte;
-} STM32_LoadAddress_t;
+} stm32_loadaddress_t;
 
 /**
  * @brief Initialize the instance of the STM32 OTA for the given parameters set
@@ -68,7 +68,7 @@ typedef struct _STM32_LoadAddress_t {
  * @param stm32_ota_t Pointer to the stm32_ota_t struct
  * @return esp_err_t
  */
-esp_err_t stm32_init(STM32_OTA_t *stm32_ota);
+esp_err_t stm32_init(stm32_ota_t *stm32_ota);
 /**
  * @brief Reset the STM32 by flipping the BOOTn and ~NRST pins to the 'running'
  * values
@@ -76,7 +76,7 @@ esp_err_t stm32_init(STM32_OTA_t *stm32_ota);
  * @param stm32_ota
  * @return esp_err_t
  */
-esp_err_t stm32_reset(STM32_OTA_t *stm32_ota);
+esp_err_t stm32_reset(stm32_ota_t *stm32_ota);
 /**
  * @brief Set the STM32 up to begin a full flash.
  *
@@ -86,7 +86,7 @@ esp_err_t stm32_reset(STM32_OTA_t *stm32_ota);
  * @param stm32_ota
  * @return esp_err_t
  */
-esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota);
+esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota);
 /**
  * @brief Ends the STM32 OTA flash session, and reset the STM32 to the running
  * values
@@ -94,7 +94,7 @@ esp_err_t stm32_ota_begin(STM32_OTA_t *stm32_ota);
  * @param stm32_ota
  * @return esp_err_t
  */
-esp_err_t stm32_ota_end(STM32_OTA_t *stm32_ota);
+esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota);
 /**
  * @brief Writes a page of byte data to the STM32.
  *
@@ -106,7 +106,7 @@ esp_err_t stm32_ota_end(STM32_OTA_t *stm32_ota);
  * @param ota_data_size
  * @return esp_err_t
  */
-esp_err_t stm32_ota_write_page(STM32_OTA_t *stm32_ota, STM32_LoadAddress_t *load_address, const char *ota_data,
+esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
                                size_t ota_data_size);
 
-#endif  //  __STM32_OTA_H
+#endif  //  __stm32_ota_H
