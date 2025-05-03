@@ -11,6 +11,8 @@
 #ifndef __stm32_ota_H
 #define __stm32_ota_H
 
+#define STM32_TAG           "STM32_OTA"
+
 #define STM32_HIGH          (1)
 #define STM32_LOW           (0)
 

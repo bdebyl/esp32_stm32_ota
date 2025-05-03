@@ -9,6 +9,7 @@
  *
  */
 #include "stm32ota.h"
+#include "esp_log.h"
 
 /**
  * @brief Internal function to XOR all bytes in an stm32_loadaddress_t
@@ -40,6 +41,7 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
     uart_err = uart_get_buffered_data_len(stm32_ota->uart_port, &read_size);
 
     if (uart_err != ESP_OK) {
+    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len uart error code %d", uart_err);
       return uart_err;
     }
 
@@ -49,10 +51,12 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
   }
 
   if (timer >= STM32_UART_TIMEOUT) {
+    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len timeout (read: %d, expected: %d)", read_size, expected_size);
     return ESP_ERR_TIMEOUT;
   }
 
   if (read_size < expected_size) {
+    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len invalid size (read: %d, expected: %d)", read_size, expected_size);
     return ESP_ERR_INVALID_SIZE;
   }
 
@@ -71,13 +75,16 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
 static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_bytes, size_t write_size,
                                     size_t response_size) {
   // Send initial UART data and ensure response size is what we expect
-  const int bytes_written = uart_write_bytes(stm32_ota->uart_port, write_bytes, write_size);
+  ESP_LOGI(STM32_TAG, "Write bytes size %d, expecting %d response bytes, write buff at %d (NULL: %d : Port: %d)",
+           write_size, response_size, *write_bytes, write_bytes == NULL, stm32_ota->uart_port);
+  int bytes_written = uart_write_bytes(stm32_ota->uart_port, write_bytes, write_size);
   if (bytes_written != write_size) {
     return ESP_ERR_INVALID_SIZE;
   }
 
   esp_err_t err = _stm32_await_rx(stm32_ota, response_size);
   if (err != ESP_OK) {
+    ESP_LOGE(STM32_TAG, "Error encountered when awaing response from stm32 code %d", err);
     return err;
   }
 
@@ -89,6 +96,7 @@ static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_by
 
   // Ensure we got an acknowledgement or there is more than 0 response data
   if (bytes_read[0] != STM32_UART_ACK || read_size == 0) {
+    ESP_LOGE(STM32_TAG, "Error with invalid response (ACK code: %02x, size: %d)", bytes_read[0], read_size);
     err = ESP_ERR_INVALID_RESPONSE;
   }
 
@@ -105,8 +113,8 @@ esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
 
   // Setup the UART driver
   STM32_ERROR_CHECK(uart_driver_install(stm32_ota->uart_port, stm32_ota->uart_rx_buffer_size,
-                                        stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size,
-                                        stm32_ota->uart_queue, stm32_ota->uart_intr_alloc_flags));
+                                        stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size, NULL,
+                                        stm32_ota->uart_intr_alloc_flags));
 
   STM32_ERROR_CHECK(uart_param_config(stm32_ota->uart_port, stm32_ota->uart_config));
 
@@ -205,7 +213,9 @@ esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota) {
   if (!stm32_ota->disable_boot1_pin)
     STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_HIGH));
 
-  return gpio_set_level(stm32_ota->stm_nrst_pin, STM32_HIGH);
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_nrst_pin, STM32_HIGH));
+
+  return stm32_reset(stm32_ota);
 }
 
 esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
