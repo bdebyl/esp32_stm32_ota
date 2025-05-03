@@ -41,7 +41,7 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
     uart_err = uart_get_buffered_data_len(stm32_ota->uart_port, &read_size);
 
     if (uart_err != ESP_OK) {
-    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len uart error code %d", uart_err);
+      ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len uart error code %d", uart_err);
       return uart_err;
     }
 
@@ -152,14 +152,12 @@ esp_err_t stm32_reset(stm32_ota_t *stm32_ota_t) {
 
 esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // Set GPIO levels to being flashing STM32
-  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
-  if (!stm32_ota->disable_boot1_pin)
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_HIGH));
+  if (!stm32_ota->disable_boot1_pin) {
     STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW));
+  }
 
-  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_nrst_pin, STM32_LOW));
-
-  // TODO: use non-blocking delay
-  vTaskDelay(500 / portTICK_PERIOD_MS);
+  STM32_ERROR_CHECK(stm32_reset(stm32_ota));
 
   /**
    * @brief For more information on commands below, see the following PDF:
@@ -209,11 +207,10 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
 }
 
 esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota) {
-  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_HIGH));
-  if (!stm32_ota->disable_boot1_pin)
-    STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_HIGH));
-
-  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_nrst_pin, STM32_HIGH));
+  STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot0_pin, STM32_LOW));
+  if (!stm32_ota->disable_boot1_pin) {
+    STM32_ERROR_CHECK(gpio_set_level(stm32_ota->stm_boot1_pin, STM32_LOW));
+  }
 
   return stm32_reset(stm32_ota);
 }
