@@ -105,6 +105,24 @@ static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_by
   return err;
 }
 
+esp_err_t stm32_increment_loadaddress(stm32_loadaddress_t *stm32_loadaddress, size_t addition) {
+  uint32_t full_address = (stm32_loadaddress->high_byte << 24) | (stm32_loadaddress->mid_high_byte << 16) |
+                          (stm32_loadaddress->mid_low_byte << 8) | stm32_loadaddress->low_byte;
+
+  full_address += addition;
+
+  if (full_address > 0x080FFFFF) {
+    return ESP_ERR_INVALID_SIZE;
+  }
+
+  stm32_loadaddress->high_byte     = (full_address >> 24) & 0xFF;
+  stm32_loadaddress->mid_high_byte = (full_address >> 16) & 0xFF;
+  stm32_loadaddress->mid_low_byte  = (full_address >> 8) & 0xFF;
+  stm32_loadaddress->low_byte      = (full_address) & 0xFF;
+
+  return ESP_OK;
+}
+
 esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
   // Check for null pointer
   if (stm32_ota == NULL) {
@@ -116,7 +134,15 @@ esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
                                         stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size, NULL,
                                         stm32_ota->uart_intr_alloc_flags));
 
-  STM32_ERROR_CHECK(uart_param_config(stm32_ota->uart_port, stm32_ota->uart_config));
+  uart_config_t stm32_uart_config = {
+      .baud_rate = stm32_ota->uart_baudrate,
+      .data_bits = UART_DATA_8_BITS,
+      .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+      .parity    = UART_PARITY_EVEN,
+      .stop_bits = UART_STOP_BITS_1,
+  };
+
+  STM32_ERROR_CHECK(uart_param_config(stm32_ota->uart_port, &stm32_uart_config));
 
   STM32_ERROR_CHECK(uart_set_pin(stm32_ota->uart_port, stm32_ota->stm_tx_pin, stm32_ota->stm_rx_pin, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
@@ -194,59 +220,27 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_get_id, 2, 5));
   ESP_LOGI(STM32_TAG, "GET ID success");
 
-  // 5.0.1. Set STM32 to read unprotected (RPUN)
+  // 5.0.1. Set STM32 to write and read unprotected, note that read unprotect
+  // (RPUN) does a mass erase
   // TODO: do something with response information
-  char cmd_rpun[] = {0x92, 0x6D};  // wpun: {0x73, 0x8C};
+  char cmd_wpun[] = {0x73, 0x8C};
+  ESP_LOGI(STM32_TAG, "WPUN send");
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_wpun, 2, 2));
+  ESP_LOGI(STM32_TAG, "WPUN success");
+  vTaskDelay(200 / portTICK_PERIOD_MS);
+
+  // Write unprotect triggers a system reset requiring bootloader re-init
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1));
+
+  char cmd_rpun[] = {0x92, 0x6D};
   ESP_LOGI(STM32_TAG, "RPUN send");
   STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_rpun, 2, 2));
   ESP_LOGI(STM32_TAG, "RPUN success");
   vTaskDelay(500 / portTICK_PERIOD_MS);
 
+  // Read unprotect triggers a system reset requiring bootloader re-init
   STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1));
 
-  // char cmd_wpun[] = {0x73, 0x8C};
-  // ESP_LOGI(STM32_TAG, "sending bootloader write unprotect command");
-  // STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_wpun, 2, 2));
-  // ESP_LOGI(STM32_TAG, "bootloader write unprotect command successful");
-  // vTaskDelay(200 / portTICK_PERIOD_MS);
-
-  // STM32_ERROR_CHECK(stm32_reset(stm32_ota));
-  //STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1));
-
-  // 5.1. Erase all data on the STM32
-  // TODO: do something with response information
-  /* char cmd_erase[] = {0x43, 0xBC};
-  ESP_LOGI(STM32_TAG, "ERASE send");
-  if (_stm32_write_bytes(stm32_ota, cmd_erase, 2, 1) == ESP_OK) {
-    ESP_LOGI(STM32_TAG, "ERASE success");
-
-    // 5.2. Send a global erase once the erase has been acknowledged
-    char cmd_erase_global[] = {0xFF, 0x00};
-    ESP_LOGI(STM32_TAG, "ERASE GLOBAL send");
-    if (_stm32_write_bytes(stm32_ota, cmd_erase_global, 2, 1) == ESP_OK) {
-      ESP_LOGI(STM32_TAG, "ERASE GLOBAL success");
-    } else {
-      ESP_LOGE(STM32_TAG, "ERASE GLOBAL fail");
-
-      return ESP_FAIL;
-    }
-  } else {
-    ESP_LOGW(STM32_TAG, "ERASE fail");
-
-    // 6.1. Send extended erase
-    char cmd_extended_erase[] = {0x44, 0xBB};
-    ESP_LOGI(STM32_TAG, "EXTENDED ERASE send");
-    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_extended_erase, 2, 1));
-    ESP_LOGI(STM32_TAG, "EXTENDED ERASE success");
-
-    // 6.2. Send mass erase special instruction to extended erase with checksum
-    char cmd_extended_erase_mass[] = {0xFF, 0xFF, 0x00};
-    ESP_LOGI(STM32_TAG, "MASS ERASE send");
-    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_extended_erase_mass, 3, 1));
-    ESP_LOGI(STM32_TAG, "MASS ERASE success");
-  } */
-
-  // Begin procedure is finished, we are ready to start writing to the STM32
   return ESP_OK;
 }
 
@@ -259,9 +253,9 @@ esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota) {
   return stm32_reset(stm32_ota);
 }
 
-esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
-                               size_t ota_data_size) {
-  if (ota_data_size > STM32_MAX_PAGE_SIZE || ota_data_size == 0) {
+esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
+                                        size_t ota_data_size) {
+  if (ota_data_size > STM32_MAX_PAGE_SIZE || ota_data_size == 0 || ota_data_size % 4 != 0) {
     return ESP_ERR_INVALID_SIZE;
   }
 
@@ -275,11 +269,11 @@ esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load
       load_address->high_byte, load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte,
       load_address_xor,
   };
-  ESP_LOGI(STM32_TAG, "LOAD ADDRESS %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
-           load_address->mid_high_byte, load_address->mid_low_byte, load_address->mid_low_byte, load_address_xor);
+  ESP_LOGI(STM32_TAG, "LOAD ADDRESS  WRITE %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
+           load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte, load_address_xor);
   STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1));
 
-  // Ensure we always send 1 to 256 bytes (0 < N <= 255)
+  // Ensure we always send 1 to 256 bytes as a size (0 < N <= 255)
   size_t ota_bytes_size = ota_data_size - 1;
 
   // Send the size of the data to be written
@@ -320,6 +314,53 @@ esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load
     ESP_LOGE(STM32_TAG, "ACK not received for writing page");
     return ESP_ERR_INVALID_RESPONSE;
   }
+
+  // Read back the data
+  char cmd_read[] = {0x11, 0xEE};
+  ESP_LOGI(STM32_TAG, "READ command");
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_read, 2, 1));
+
+  // Send the load address with the last byte being an XOR of all bytes combined
+  ESP_LOGI(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
+           load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte, load_address_xor);
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1));
+
+  // Send the size of the data to be read along with it's checksum (complement)
+  char ota_read_size[] = {
+      ota_bytes_size,
+      ota_bytes_size ^ 0xFF,
+  };
+  ESP_LOGI(STM32_TAG, "READ SIZE send");
+  if (uart_write_bytes(stm32_ota->uart_port, &ota_read_size, 2) != 2) {
+    ESP_LOGE(STM32_TAG, "failed to write read page size request information (size: %d)", ota_bytes_size);
+    return ESP_FAIL;
+  }
+  ESP_LOGI(STM32_TAG, "READ SIZE success");
+
+  // Await ACK from STM32 to respond with data size and checksum
+  STM32_ERROR_CHECK(_stm32_await_rx(stm32_ota, ota_data_size + 1));
+
+  // Prepare for reading back UART data for verification
+  uint8_t ota_data_response[ota_data_size + 1];
+  ESP_LOGI(STM32_TAG, "READ data");
+  const int ota_data_response_size = uart_read_bytes(stm32_ota->uart_port, ota_data_response, ota_data_size + 1, 1000 / portTICK_PERIOD_MS);
+  if (ota_data_response_size != ota_data_size + 1) {
+    ESP_LOGE(STM32_TAG, "READ data expected %d but response was %d", ota_data_size + 1, ota_data_response_size);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+  ESP_LOGI(STM32_TAG, "READ success");
+
+
+  ESP_LOGI(STM32_TAG, "VERIFY processing");
+  for (size_t i = 0; i < ota_data_size; i++) {
+    if (ota_data[i] != ota_data_response[i]) {
+      ESP_LOGE(STM32_TAG, "VERIFY failed index %d ota data %02x != %02x", i, ota_data[i], ota_data_response[i]);
+      return ESP_ERR_INVALID_RESPONSE;
+    }
+  }
+  ESP_LOGI(STM32_TAG, "VERIFY complete");
+
+  STM32_ERROR_CHECK(stm32_increment_loadaddress(load_address, ota_data_size));
 
   return ESP_OK;
 }
