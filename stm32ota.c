@@ -344,17 +344,18 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   uint8_t ota_data_response[ota_data_size + 1];
   ESP_LOGI(STM32_TAG, "READ data");
   const int ota_data_response_size = uart_read_bytes(stm32_ota->uart_port, ota_data_response, ota_data_size + 1, 1000 / portTICK_PERIOD_MS);
-  if (ota_data_response_size != ota_data_size + 1) {
+  if (ota_data_response_size != ota_data_size + 1 || ota_data_response[0] != STM32_UART_ACK) {
     ESP_LOGE(STM32_TAG, "READ data expected %d but response was %d", ota_data_size + 1, ota_data_response_size);
     return ESP_ERR_INVALID_RESPONSE;
   }
   ESP_LOGI(STM32_TAG, "READ success");
 
-
   ESP_LOGI(STM32_TAG, "VERIFY processing");
   for (size_t i = 0; i < ota_data_size; i++) {
-    if (ota_data[i] != ota_data_response[i]) {
-      ESP_LOGE(STM32_TAG, "VERIFY failed index %d ota data %02x != %02x", i, ota_data[i], ota_data_response[i]);
+    // Note that we add 1 to the response index as the first byte in the
+    // response is an ACK byte (0x79)
+    if (ota_data[i] != ota_data_response[i + 1]) {
+      ESP_LOGE(STM32_TAG, "VERIFY failed index %d ota data %02x != %02x", i, ota_data[i], ota_data_response[i + 1]);
       return ESP_ERR_INVALID_RESPONSE;
     }
   }
