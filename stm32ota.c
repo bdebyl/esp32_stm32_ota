@@ -129,6 +129,11 @@ esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
     return ESP_ERR_INVALID_ARG;
   }
 
+  // Check for maximum values
+  if (stm32_ota->uart_baudrate > STM32_MAX_BAUD_RATE) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
   // Setup the UART driver
   STM32_ERROR_CHECK(uart_driver_install(stm32_ota->uart_port, stm32_ota->uart_rx_buffer_size,
                                         stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size, NULL,

@@ -13,13 +13,17 @@
 
 #define STM32_TAG           "STM32_OTA"
 
-#define STM32_HIGH          (1)
-#define STM32_LOW           (0)
+#define STM32_HIGH          1
+#define STM32_LOW           0
 
-#define STM32_UART_TIMEOUT  (0x0001FFFF)
-#define STM32_UART_ACK      (0x79)
+#define STM32_UART_TIMEOUT  0x0001FFFF
+#define STM32_UART_ACK      0x79
+#define STM32_UART_ACK      0x1F  // Not used
 
-#define STM32_MAX_PAGE_SIZE (0xFF)
+#define STM32_MAX_PAGE_SIZE 0xFF
+
+// AN3155 Rev 19 states the max baudrate of the UART bootloader is 115200 baud
+#define STM32_MAX_BAUD_RATE 115200
 
 #define STM32_ERROR_CHECK(func)                                                                                        \
   {                                                                                                                    \
@@ -118,6 +122,6 @@ esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota);
  * @return esp_err_t
  */
 esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
-                               size_t ota_data_size);
+                                        size_t ota_data_size);
 
 #endif  //  __stm32_ota_H
