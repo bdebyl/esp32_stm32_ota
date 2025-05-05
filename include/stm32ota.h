@@ -16,9 +16,9 @@
 #define STM32_HIGH          1
 #define STM32_LOW           0
 
-#define STM32_UART_TIMEOUT  0x0001FFFF
+#define STM32_UART_TIMEOUT  0x00FFFFFF
 #define STM32_UART_ACK      0x79
-#define STM32_UART_ACK      0x1F  // Not used
+#define STM32_UART_NACK     0x1F  // Not used
 
 #define STM32_MAX_PAGE_SIZE 0xFF
 
