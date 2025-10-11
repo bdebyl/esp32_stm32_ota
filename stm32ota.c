@@ -27,9 +27,10 @@ static char _stm32_load_address_xor(stm32_loadaddress_t *load_address) {
  *
  * @param stm32_ota
  * @param expected_size
+ * @param timeout Maximum timeout iterations (use STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
  * @return esp_err_t
  */
-static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
+static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size, uint32_t timeout) {
   // Setup awaiting expected response size in the UART buffer prior to
   // continuing, this is a blocking call and could be improved later
   uint32_t timer     = 0;
@@ -37,7 +38,7 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
 
   // Loop to check against timeout or if we got the expected size
   esp_err_t uart_err = ESP_OK;
-  while (timer < STM32_UART_TIMEOUT && read_size < expected_size) {
+  while (timer < timeout && read_size < expected_size) {
     uart_err = uart_get_buffered_data_len(stm32_ota->uart_port, &read_size);
 
     if (uart_err != ESP_OK) {
@@ -45,13 +46,19 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
       return uart_err;
     }
 
-    // TODO: Don't use vTaskDelay
+    // Yield to scheduler every iteration to prevent starving IDLE task watchdog
+    // This allows the IDLE task to run and reset its watchdog timer
     vTaskDelay(1 / portTICK_PERIOD_MS);
     timer++;
+
+    // Every 100ms, yield explicitly to give other tasks more CPU time
+    if (timer % 100 == 0) {
+      taskYIELD();
+    }
   }
 
-  if (timer >= STM32_UART_TIMEOUT) {
-    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len timeout (read: %d, expected: %d)", read_size, expected_size);
+  if (timer >= timeout) {
+    ESP_LOGE(STM32_TAG, "uart_get_buffered_data_len timeout (read: %d, expected: %d, timer: %lu)", read_size, expected_size, timer);
     return ESP_ERR_TIMEOUT;
   }
 
@@ -70,10 +77,11 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size) {
  * @param write_bytes
  * @param write_size
  * @param response_size
+ * @param timeout Maximum timeout iterations (use STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
  * @return esp_err_t
  */
 static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_bytes, size_t write_size,
-                                    size_t response_size) {
+                                    size_t response_size, uint32_t timeout) {
   // Prepare for reading back UART data for validity
   uint8_t bytes_read[response_size];
   STM32_ERROR_CHECK(uart_flush(stm32_ota->uart_port));
@@ -86,7 +94,7 @@ static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_by
     return ESP_ERR_INVALID_SIZE;
   }
 
-  esp_err_t err = _stm32_await_rx(stm32_ota, response_size);
+  esp_err_t err = _stm32_await_rx(stm32_ota, response_size, timeout);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Error encountered when awaiting response from stm32 code %d", err);
     return err;
@@ -201,7 +209,7 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // 1. Initial bootloader command
   ESP_LOGI(STM32_TAG, "Sending initial bootloader sync command (0x7F)");
   char cmd_bootloader[] = {0x7F};
-  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1);
+  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to sync with STM32 bootloader: %s", esp_err_to_name(err));
     return err;
@@ -210,7 +218,7 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // 2. Run the Get command and validate we got expected response size
   ESP_LOGI(STM32_TAG, "Sending Get command (0x00)");
   char cmd_get[] = {0x00, 0xFF};
-  err = _stm32_write_bytes(stm32_ota, cmd_get, 2, 15);
+  err = _stm32_write_bytes(stm32_ota, cmd_get, 2, 15, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to execute Get command: %s", esp_err_to_name(err));
     return err;
@@ -219,7 +227,7 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // 3. Run the Get Version command and validate we get expected response size
   ESP_LOGI(STM32_TAG, "Sending Get Version command (0x01)");
   char cmd_get_version[] = {0x01, 0xFE};
-  err = _stm32_write_bytes(stm32_ota, cmd_get_version, 2, 5);
+  err = _stm32_write_bytes(stm32_ota, cmd_get_version, 2, 5, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to get bootloader version: %s", esp_err_to_name(err));
     return err;
@@ -228,7 +236,7 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // 4. Run the Get ID command and validate we get expected response size
   ESP_LOGI(STM32_TAG, "Sending Get ID command (0x02)");
   char cmd_get_id[] = {0x02, 0xFD};
-  err = _stm32_write_bytes(stm32_ota, cmd_get_id, 2, 5);
+  err = _stm32_write_bytes(stm32_ota, cmd_get_id, 2, 5, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to get chip ID: %s", esp_err_to_name(err));
     return err;
@@ -258,12 +266,12 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   // 5. Erase flash memory - try regular erase first, fall back to extended erase
   ESP_LOGI(STM32_TAG, "Sending Erase command (0x43) - this may take several seconds");
   char cmd_erase[] = {0x43, 0xBC};
-  err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1);
+  err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT);
   if (err == ESP_OK) {
     // Regular erase is supported, send global erase command
-    ESP_LOGI(STM32_TAG, "Sending global erase command");
+    ESP_LOGI(STM32_TAG, "Sending global erase command (may take up to 60 seconds)");
     char cmd_erase_global[] = {0xFF, 0x00};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_global, 2, 1);
+    err = _stm32_write_bytes(stm32_ota, cmd_erase_global, 2, 1, STM32_UART_TIMEOUT_EXTENDED);
     if (err != ESP_OK) {
       ESP_LOGE(STM32_TAG, "Failed to execute global erase: %s", esp_err_to_name(err));
       return err;
@@ -273,16 +281,16 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
     // Regular erase not supported, try extended erase (for chips with >256 pages)
     ESP_LOGI(STM32_TAG, "Regular erase not supported, trying Extended Erase command (0x44)");
     char cmd_erase_ext[] = {0x44, 0xBB};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext, 2, 1);
+    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext, 2, 1, STM32_UART_TIMEOUT);
     if (err != ESP_OK) {
       ESP_LOGE(STM32_TAG, "Failed to initiate extended erase: %s", esp_err_to_name(err));
       return err;
     }
 
-    // Send mass erase instruction
-    ESP_LOGI(STM32_TAG, "Sending mass erase instruction");
+    // Send mass erase instruction (may take up to 60 seconds for large flash)
+    ESP_LOGI(STM32_TAG, "Sending mass erase instruction (may take up to 60 seconds)");
     char cmd_erase_ext_mass[] = {0xFF, 0xFF, 0x00};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext_mass, 3, 1);
+    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext_mass, 3, 1, STM32_UART_TIMEOUT_EXTENDED);
     if (err != ESP_OK) {
       ESP_LOGE(STM32_TAG, "Failed to execute mass erase: %s", esp_err_to_name(err));
       return err;
@@ -318,7 +326,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   ESP_LOGD(STM32_TAG, "Writing %d bytes to flash address 0x%08lX", ota_data_size, flash_addr);
 
   char cmd_write[] = {0x31, 0xCE};
-  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_write, 2, 1);
+  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_write, 2, 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to send Write command for address 0x%08lX: %s", flash_addr, esp_err_to_name(err));
     return err;
@@ -332,7 +340,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   };
   ESP_LOGD(STM32_TAG, "LOAD ADDRESS  WRITE %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
            load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte, load_address_xor);
-  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1));
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT));
 
   // Ensure we always send 1 to 256 bytes as a size (0 < N <= 255)
   size_t ota_bytes_size = ota_data_size - 1;
@@ -361,7 +369,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   }
 
   // Await ACK from STM32
-  err = _stm32_await_rx(stm32_ota, 1);
+  err = _stm32_await_rx(stm32_ota, 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to receive ACK for write to address 0x%08lX: %s", flash_addr, esp_err_to_name(err));
     return err;
@@ -385,7 +393,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   // Read back the data for verification
   ESP_LOGD(STM32_TAG, "Verifying write at address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
   char cmd_read[] = {0x11, 0xEE};
-  err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1);
+  err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to send Read command for verification at address 0x%08lX: %s", flash_addr,
              esp_err_to_name(err));
@@ -395,7 +403,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   // Send the load address with the last byte being an XOR of all bytes combined
   ESP_LOGD(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
            load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte, load_address_xor);
-  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1));
+  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT));
 
   // Send the size of the data to be read along with it's checksum (complement)
   char ota_read_size[] = {
@@ -409,7 +417,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   }
 
   // Await ACK from STM32 to respond with data size and checksum
-  err = _stm32_await_rx(stm32_ota, ota_data_size + 1);
+  err = _stm32_await_rx(stm32_ota, ota_data_size + 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE(STM32_TAG, "Failed to receive read data for verification at address 0x%08lX: %s", flash_addr,
              esp_err_to_name(err));

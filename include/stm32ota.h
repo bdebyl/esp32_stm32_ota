@@ -16,7 +16,8 @@
 #define STM32_HIGH          1
 #define STM32_LOW           0
 
-#define STM32_UART_TIMEOUT  0x00FFFFFF
+#define STM32_UART_TIMEOUT  0x00FFFFFF  // ~16 seconds (for normal operations)
+#define STM32_UART_TIMEOUT_EXTENDED  0x0FFFFFFF  // ~70 seconds (for mass erase)
 #define STM32_UART_ACK      0x79
 #define STM32_UART_NACK     0x1F  // Not used
 
