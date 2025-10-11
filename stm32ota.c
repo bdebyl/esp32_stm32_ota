@@ -46,15 +46,12 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size, u
       return uart_err;
     }
 
-    // Yield to scheduler every iteration to prevent starving IDLE task watchdog
-    // This allows the IDLE task to run and reset its watchdog timer
-    vTaskDelay(1 / portTICK_PERIOD_MS);
-    timer++;
-
-    // Every 100ms, yield explicitly to give other tasks more CPU time
-    if (timer % 100 == 0) {
-      taskYIELD();
-    }
+    // Yield to scheduler with 10ms delay to allow IDLE task to run
+    // This prevents starving the IDLE task watchdog even when called from high-priority tasks
+    // (e.g., btController). The 10ms delay gives the scheduler enough time to preempt to
+    // lower-priority tasks like IDLE, which must run periodically to reset its watchdog.
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    timer += 10;  // Increment by delay amount to maintain timeout accuracy
   }
 
   if (timer >= timeout) {
