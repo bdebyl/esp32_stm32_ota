@@ -56,9 +56,10 @@ typedef struct _stm32_ota_t {
   int         uart_queue_size;        // UART event queue size/depth (ex. 0)*/
   int         uart_rx_buffer_size;    // RX UART buffer size in bytes (ex. 0)
   int         uart_tx_buffer_size;    // TX UART buffer size in bytes (ex. 1024)
-  int         uart_baudrate;          // UART config
+  int         uart_baudrate;          // UART config (115200 for bootloader)
   uart_port_t uart_port;              // UART port of the ESP to use
   uint8_t     disable_boot1_pin;      // Set to 1 if not using boot1_pin
+  uint8_t     uart_externally_managed; // Set to 1 if UART is managed externally (shared with VCU protocol)
 } stm32_ota_t;
 
 typedef struct _stm32_loadaddress_t {

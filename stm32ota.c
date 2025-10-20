@@ -134,28 +134,35 @@ esp_err_t stm32_init(stm32_ota_t *stm32_ota) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Check for maximum values
-  if (stm32_ota->uart_baudrate > STM32_MAX_BAUD_RATE) {
-    return ESP_ERR_INVALID_ARG;
+  // Only initialize UART if not externally managed
+  if (!stm32_ota->uart_externally_managed) {
+    // Check for maximum values
+    if (stm32_ota->uart_baudrate > STM32_MAX_BAUD_RATE) {
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    // Setup the UART driver
+    STM32_ERROR_CHECK(uart_driver_install(stm32_ota->uart_port, stm32_ota->uart_rx_buffer_size,
+                                          stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size, NULL,
+                                          stm32_ota->uart_intr_alloc_flags));
+
+    uart_config_t stm32_uart_config = {
+        .baud_rate = stm32_ota->uart_baudrate,
+        .data_bits = UART_DATA_8_BITS,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .parity    = UART_PARITY_EVEN,
+        .stop_bits = UART_STOP_BITS_1,
+    };
+
+    STM32_ERROR_CHECK(uart_param_config(stm32_ota->uart_port, &stm32_uart_config));
+
+    STM32_ERROR_CHECK(uart_set_pin(stm32_ota->uart_port, stm32_ota->stm_tx_pin, stm32_ota->stm_rx_pin, UART_PIN_NO_CHANGE,
+                                   UART_PIN_NO_CHANGE));
+
+    ESP_LOGI(STM32_TAG, "UART initialized by STM32 OTA component (standalone mode)");
+  } else {
+    ESP_LOGI(STM32_TAG, "UART externally managed (shared with VCU protocol)");
   }
-
-  // Setup the UART driver
-  STM32_ERROR_CHECK(uart_driver_install(stm32_ota->uart_port, stm32_ota->uart_rx_buffer_size,
-                                        stm32_ota->uart_tx_buffer_size, stm32_ota->uart_queue_size, NULL,
-                                        stm32_ota->uart_intr_alloc_flags));
-
-  uart_config_t stm32_uart_config = {
-      .baud_rate = stm32_ota->uart_baudrate,
-      .data_bits = UART_DATA_8_BITS,
-      .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-      .parity    = UART_PARITY_EVEN,
-      .stop_bits = UART_STOP_BITS_1,
-  };
-
-  STM32_ERROR_CHECK(uart_param_config(stm32_ota->uart_port, &stm32_uart_config));
-
-  STM32_ERROR_CHECK(uart_set_pin(stm32_ota->uart_port, stm32_ota->stm_tx_pin, stm32_ota->stm_rx_pin, UART_PIN_NO_CHANGE,
-                                 UART_PIN_NO_CHANGE));
 
   // Setup GPIO pin for reset pin ~NRST
   STM32_ERROR_CHECK(gpio_set_direction(stm32_ota->stm_nrst_pin, GPIO_MODE_OUTPUT));
