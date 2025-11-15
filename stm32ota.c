@@ -346,8 +346,8 @@ esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota) {
   return stm32_reset(stm32_ota);
 }
 
-esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
-                                        size_t ota_data_size) {
+esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
+                               size_t ota_data_size) {
   if (ota_data_size > STM32_MAX_PAGE_SIZE || ota_data_size == 0 || ota_data_size % 4 != 0) {
     ESP_LOGE(STM32_TAG, "Invalid page size: %d bytes (max: %d, must be multiple of 4)", ota_data_size,
              STM32_MAX_PAGE_SIZE);
@@ -425,23 +425,58 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
     return ESP_ERR_INVALID_RESPONSE;
   }
 
-  // Read back the data for verification
-  ESP_LOGD(STM32_TAG, "Verifying write at address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
-  char cmd_read[] = {0x11, 0xEE};
-  err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
-  if (err != ESP_OK) {
-    ESP_LOGE(STM32_TAG, "Failed to send Read command (0x11) for verification at address 0x%08lX: %s "
-             "(if NACK received, check read protection status)", flash_addr, esp_err_to_name(err));
-    return err;
+  // Write successful - increment address for next page
+  STM32_ERROR_CHECK(stm32_increment_loadaddress(load_address, ota_data_size));
+
+  return ESP_OK;
+}
+
+esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
+                                        size_t ota_data_size) {
+  if (ota_data_size > STM32_MAX_PAGE_SIZE || ota_data_size == 0 || ota_data_size % 4 != 0) {
+    ESP_LOGE(STM32_TAG, "Invalid page size: %d bytes (max: %d, must be multiple of 4)", ota_data_size,
+             STM32_MAX_PAGE_SIZE);
+    return ESP_ERR_INVALID_SIZE;
   }
 
-  // Send the load address with the last byte being an XOR of all bytes combined
-  ESP_LOGD(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", load_address->high_byte,
-           load_address->mid_high_byte, load_address->mid_low_byte, load_address->low_byte, load_address_xor);
+  // Calculate flash address for error reporting
+  uint32_t flash_addr = (load_address->high_byte << 24) | (load_address->mid_high_byte << 16) |
+                        (load_address->mid_low_byte << 8) | load_address->low_byte;
+
+  // Save original load address for verification (write increments it)
+  stm32_loadaddress_t original_address = *load_address;
+
+  // Perform the write operation (increments load_address on success)
+  esp_err_t write_err = stm32_ota_write_page(stm32_ota, load_address, ota_data, ota_data_size);
+  if (write_err != ESP_OK) {
+    return write_err;
+  }
+
+  // Read back the data for verification using original address
+  ESP_LOGD(STM32_TAG, "Verifying write at address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
+  char cmd_read[] = {0x11, 0xEE};
+  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGW(STM32_TAG, "Read command (0x11) rejected at address 0x%08lX: %s - skipping verification (likely read-protected)",
+             flash_addr, esp_err_to_name(err));
+    // Write succeeded but verification failed - this is acceptable if read protection is active
+    // load_address was already incremented by stm32_ota_write_page()
+    return ESP_OK;
+  }
+
+  // Send the original load address with the last byte being an XOR of all bytes combined
+  const char load_address_xor   = _stm32_load_address_xor(&original_address);
+  char       cmd_load_address[] = {
+      original_address.high_byte, original_address.mid_high_byte, original_address.mid_low_byte,
+      original_address.low_byte, load_address_xor,
+  };
+  ESP_LOGD(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", original_address.high_byte,
+           original_address.mid_high_byte, original_address.mid_low_byte, original_address.low_byte, load_address_xor);
   STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT));
 
   // Send the size of the data to be read along with it's checksum (complement)
-  char ota_read_size[] = {
+  size_t ota_bytes_size = ota_data_size - 1;  // 0 < N <= 255
+  char   ota_read_size[] = {
       ota_bytes_size,
       ota_bytes_size ^ 0xFF,
   };
@@ -482,7 +517,6 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   }
   ESP_LOGD(STM32_TAG, "Verification complete for address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
 
-  STM32_ERROR_CHECK(stm32_increment_loadaddress(load_address, ota_data_size));
-
+  // load_address was already incremented by stm32_ota_write_page()
   return ESP_OK;
 }

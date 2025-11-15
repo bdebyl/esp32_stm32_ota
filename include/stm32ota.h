@@ -113,8 +113,24 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota);
  */
 esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota);
 /**
- * @brief Writes a page of byte data to the STM32.
+ * @brief Writes a page of byte data to the STM32 without read verification.
  *
+ * Use this when read protection prevents verification or when speed is critical.
+ * stm32_ota_begin must be called before writing a page!
+ *
+ * @param stm32_ota
+ * @param load_address
+ * @param ota_data
+ * @param ota_data_size
+ * @return esp_err_t
+ */
+esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
+                               size_t ota_data_size);
+
+/**
+ * @brief Writes a page of byte data to the STM32 with read-back verification.
+ *
+ * Falls back to unverified write if read protection prevents verification.
  * stm32_ota_begin must be called before writing a page!
  *
  * @param stm32_ota
