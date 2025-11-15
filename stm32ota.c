@@ -101,9 +101,17 @@ static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_by
   const int read_size = uart_read_bytes(stm32_ota->uart_port, bytes_read, response_size, 1000 / portTICK_PERIOD_MS);
 
   // Ensure we got an acknowledgement or there is more than 0 response data
-  if (bytes_read[0] != STM32_UART_ACK || read_size == 0) {
-    ESP_LOGE(STM32_TAG, "Invalid response received during write read (ACK code: %02x, size: %d)", bytes_read[0],
-             read_size);
+  if (read_size == 0) {
+    ESP_LOGE(STM32_TAG, "No response received (timeout or empty buffer)");
+    err = ESP_ERR_INVALID_RESPONSE;
+  } else if (bytes_read[0] == STM32_UART_NACK) {
+    // NACK (0x1F) - bootloader rejected the command
+    ESP_LOGE(STM32_TAG, "NACK (0x1F) received - bootloader rejected command (possible reasons: "
+             "invalid command, checksum error, address out of range, protection active, malformed packet)");
+    err = ESP_ERR_INVALID_RESPONSE;
+  } else if (bytes_read[0] != STM32_UART_ACK) {
+    // Unexpected response byte (neither ACK nor NACK)
+    ESP_LOGE(STM32_TAG, "Unexpected response byte: 0x%02x (expected ACK 0x79 or NACK 0x1F)", bytes_read[0]);
     err = ESP_ERR_INVALID_RESPONSE;
   }
 
@@ -246,26 +254,49 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
     return err;
   }
 
-  // 5. Disable read protection (required for READ command during write verification)
+  // 5. Disable write protection (required for flash write operations)
+  // Send Write Unprotect (0x73) - if protection enabled, will trigger system reset
+  ESP_LOGI(STM32_TAG, "Sending Write Unprotect command (0x73)");
+  char cmd_write_unprotect[] = {0x73, 0x8C};
+  err = _stm32_write_bytes(stm32_ota, cmd_write_unprotect, 2, 1, STM32_UART_TIMEOUT);
+  if (err == ESP_OK) {
+    // ACK received - protection was active, chip will reset now
+    ESP_LOGI(STM32_TAG, "Write protection disabled - chip resetting (waiting 500ms)");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Re-sync bootloader after automatic reset
+    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after write unprotect reset");
+    STM32_ERROR_CHECK(stm32_reset(stm32_ota));
+    char cmd_bootloader_resync[] = {0x7F};
+    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+  } else {
+    // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
+    ESP_LOGI(STM32_TAG, "Write Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
+    // Continue - this is expected if flash is already writable
+  }
+
+  // 6. Disable read protection (required for READ command during write verification)
   // Send Read Unprotect (0x92) - if protection enabled, will mass erase and reset
   ESP_LOGI(STM32_TAG, "Sending Read Unprotect command (0x92)");
   char cmd_read_unprotect[] = {0x92, 0x6D};
   err = _stm32_write_bytes(stm32_ota, cmd_read_unprotect, 2, 1, STM32_UART_TIMEOUT);
-  if (err != ESP_OK) {
-    ESP_LOGW(STM32_TAG, "Read Unprotect command failed: %s (may already be unprotected)", esp_err_to_name(err));
-    // Continue - if already unprotected, this is expected
-  } else {
-    ESP_LOGI(STM32_TAG, "Read Unprotect successful - waiting for system reset");
-    vTaskDelay(pdMS_TO_TICKS(500));
+  if (err == ESP_OK) {
+    // ACK received - protection was active, chip will mass erase + reset now
+    ESP_LOGI(STM32_TAG, "Read protection disabled - chip mass erasing + resetting (waiting 2s)");
+    vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes longer than simple reset
 
-    // Re-sync bootloader after reset
-    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after read unprotect");
+    // Re-sync bootloader after automatic reset
+    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after read unprotect reset");
     STM32_ERROR_CHECK(stm32_reset(stm32_ota));
-    char cmd_bootloader[] = {0x7F};
-    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1, STM32_UART_TIMEOUT));
+    char cmd_bootloader_resync[] = {0x7F};
+    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+  } else {
+    // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
+    ESP_LOGI(STM32_TAG, "Read Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
+    // Continue - this is expected if flash is already readable
   }
 
-  // 6. Erase flash memory - try regular erase first, fall back to extended erase
+  // 7. Erase flash memory - try regular erase first, fall back to extended erase
   ESP_LOGI(STM32_TAG, "Sending Erase command (0x43) - this may take several seconds");
   char cmd_erase[] = {0x43, 0xBC};
   err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT);
@@ -397,8 +428,8 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
   char cmd_read[] = {0x11, 0xEE};
   err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
   if (err != ESP_OK) {
-    ESP_LOGE(STM32_TAG, "Failed to send Read command for verification at address 0x%08lX: %s", flash_addr,
-             esp_err_to_name(err));
+    ESP_LOGE(STM32_TAG, "Failed to send Read command (0x11) for verification at address 0x%08lX: %s "
+             "(if NACK received, check read protection status)", flash_addr, esp_err_to_name(err));
     return err;
   }
 
