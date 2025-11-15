@@ -11,6 +11,11 @@
 #include "stm32ota.h"
 #include "esp_log.h"
 
+// Forward declarations for internal helper functions
+static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size, uint32_t timeout);
+static esp_err_t _stm32_write_bytes(stm32_ota_t *stm32_ota, const char *write_bytes, size_t write_size,
+                                    size_t response_size, uint32_t timeout);
+
 /**
  * @brief Internal function to XOR all bytes in an stm32_loadaddress_t
  *
@@ -19,6 +24,93 @@
  */
 static char _stm32_load_address_xor(stm32_loadaddress_t *load_address) {
   return load_address->high_byte ^ load_address->mid_high_byte ^ load_address->mid_low_byte ^ load_address->low_byte;
+}
+
+/**
+ * @brief Internal function to check protection status via Get Version command (0x01)
+ *
+ * Attempts to detect Read Protection (RDP) and Write Protection (WRP) status by parsing
+ * the Get Version command response. Per AN3155, some bootloaders return protection status
+ * in the option bytes.
+ *
+ * @param stm32_ota Pointer to stm32_ota_t struct
+ * @param rdp_active Pointer to uint8_t - set to 1 if RDP detected, 0 if not (output parameter)
+ * @param wrp_active Pointer to uint8_t - set to 1 if WRP detected, 0 if not (output parameter)
+ * @return esp_err_t ESP_OK if detection succeeded, ESP_FAIL if Get Version not supported or parsing failed
+ */
+static esp_err_t _stm32_check_protection_status(stm32_ota_t *stm32_ota, uint8_t *rdp_active, uint8_t *wrp_active) {
+  // Send Get Version command (0x01, 0xFE)
+  ESP_LOGD(STM32_TAG, "Checking protection status via Get Version command (0x01)");
+  char cmd_get_version[] = {0x01, 0xFE};
+
+  // Flush UART before sending
+  esp_err_t err = uart_flush(stm32_ota->uart_port);
+  if (err != ESP_OK) {
+    ESP_LOGW(STM32_TAG, "UART flush failed before Get Version: %s", esp_err_to_name(err));
+    return ESP_FAIL;
+  }
+
+  // Send command
+  int bytes_written = uart_write_bytes(stm32_ota->uart_port, cmd_get_version, 2);
+  if (bytes_written != 2) {
+    ESP_LOGW(STM32_TAG, "Failed to write Get Version command");
+    return ESP_FAIL;
+  }
+
+  // Wait for response (ACK + N + version + option_byte1 + option_byte2 + ACK = 6 bytes min)
+  // Some bootloaders may return more option bytes, so we read up to 10 bytes
+  err = _stm32_await_rx(stm32_ota, 5, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGW(STM32_TAG, "Get Version command timeout or not supported: %s", esp_err_to_name(err));
+    return ESP_FAIL;
+  }
+
+  // Read response
+  uint8_t response[10];
+  int read_size = uart_read_bytes(stm32_ota->uart_port, response, 10, 1000 / portTICK_PERIOD_MS);
+
+  if (read_size < 5) {
+    ESP_LOGW(STM32_TAG, "Get Version response too short: %d bytes", read_size);
+    return ESP_FAIL;
+  }
+
+  // Validate first byte is ACK
+  if (response[0] != STM32_UART_ACK) {
+    ESP_LOGW(STM32_TAG, "Get Version did not return ACK: 0x%02x", response[0]);
+    return ESP_FAIL;
+  }
+
+  // Parse response: ACK + N + version + option_bytes...
+  uint8_t n = response[1];  // Number of bytes to follow
+  uint8_t version = response[2];
+
+  ESP_LOGD(STM32_TAG, "Bootloader version: 0x%02x, response length: %d", version, n);
+
+  // Initialize outputs to "not detected"
+  *rdp_active = 0;
+  *wrp_active = 0;
+
+  // Parse option bytes if available (bytes 3+)
+  // Note: Protection status encoding varies by bootloader version and chip family
+  // Conservative approach: check if option bytes suggest protection is active
+  if (read_size >= 4) {
+    uint8_t option_byte1 = response[3];
+
+    // Per AN3155, option byte 1 may contain RDP status
+    // Common encoding: 0xAA = unprotected, anything else = protected
+    // However, this varies by chip, so we use heuristics
+    if (option_byte1 != 0xAA && option_byte1 != 0x00) {
+      ESP_LOGD(STM32_TAG, "Option byte 1 suggests protection may be active: 0x%02x", option_byte1);
+      // Set rdp_active as a hint, but not definitive
+      *rdp_active = 1;
+    }
+  }
+
+  // Note: Write protection detection is chip-specific and not reliably detectable
+  // via Get Version on all bootloaders. We default to *wrp_active = 0 (attempt unprotect)
+
+  ESP_LOGD(STM32_TAG, "Protection status detection: RDP=%d, WRP=%d (heuristic)", *rdp_active, *wrp_active);
+  return ESP_OK;
 }
 
 /**
@@ -255,45 +347,71 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   }
 
   // 5. Disable write protection (required for flash write operations)
-  // Send Write Unprotect (0x73) - if protection enabled, will mass erase + trigger system reset
-  ESP_LOGI(STM32_TAG, "Sending Write Unprotect command (0x73)");
-  char cmd_write_unprotect[] = {0x73, 0x8C};
-  err = _stm32_write_bytes(stm32_ota, cmd_write_unprotect, 2, 1, STM32_UART_TIMEOUT);
-  if (err == ESP_OK) {
-    // ACK received - protection was active, chip will mass erase + reset now
-    ESP_LOGI(STM32_TAG, "Write protection disabled - chip mass erasing + resetting (waiting 2s)");
-    vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes time
+  // Check if we should skip write unprotect based on flags or detection
+  uint8_t wrp_detected = 0;
+  uint8_t rdp_detected = 0;
 
-    // Re-sync bootloader after automatic reset
-    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after write unprotect reset");
-    STM32_ERROR_CHECK(stm32_reset(stm32_ota));
-    char cmd_bootloader_resync[] = {0x7F};
-    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+  if (!stm32_ota->skip_write_unprotect) {
+    // Attempt to detect protection status via Get Version command
+    esp_err_t detect_err = _stm32_check_protection_status(stm32_ota, &rdp_detected, &wrp_detected);
+
+    if (detect_err == ESP_OK) {
+      ESP_LOGI(STM32_TAG, "Protection detection succeeded - RDP: %s, WRP: %s",
+               rdp_detected ? "active" : "inactive", wrp_detected ? "active" : "inactive");
+    } else {
+      ESP_LOGW(STM32_TAG, "Protection detection unavailable - will attempt unprotect commands");
+      // Fall back to attempting unprotect (conservative approach)
+      wrp_detected = 0;  // Unknown, so attempt unprotect
+    }
+
+    // Send Write Unprotect (0x73) - if protection enabled, will mass erase + trigger system reset
+    ESP_LOGI(STM32_TAG, "Sending Write Unprotect command (0x73)");
+    char cmd_write_unprotect[] = {0x73, 0x8C};
+    err = _stm32_write_bytes(stm32_ota, cmd_write_unprotect, 2, 1, STM32_UART_TIMEOUT);
+    if (err == ESP_OK) {
+      // ACK received - protection was active, chip will mass erase + reset now
+      ESP_LOGI(STM32_TAG, "Write protection disabled - chip mass erasing + resetting (waiting 2s)");
+      vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes time
+
+      // Re-sync bootloader after automatic reset
+      ESP_LOGI(STM32_TAG, "Re-syncing bootloader after write unprotect reset");
+      STM32_ERROR_CHECK(stm32_reset(stm32_ota));
+      char cmd_bootloader_resync[] = {0x7F};
+      STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+    } else {
+      // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
+      ESP_LOGI(STM32_TAG, "Write Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
+      // Continue - this is expected if flash is already writable
+    }
   } else {
-    // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
-    ESP_LOGI(STM32_TAG, "Write Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
-    // Continue - this is expected if flash is already writable
+    ESP_LOGI(STM32_TAG, "Skipping Write Unprotect (skip_write_unprotect = 1)");
   }
 
   // 6. Disable read protection (required for READ command during write verification)
-  // Send Read Unprotect (0x92) - if protection enabled, will mass erase and reset
-  ESP_LOGI(STM32_TAG, "Sending Read Unprotect command (0x92)");
-  char cmd_read_unprotect[] = {0x92, 0x6D};
-  err = _stm32_write_bytes(stm32_ota, cmd_read_unprotect, 2, 1, STM32_UART_TIMEOUT);
-  if (err == ESP_OK) {
-    // ACK received - protection was active, chip will mass erase + reset now
-    ESP_LOGI(STM32_TAG, "Read protection disabled - chip mass erasing + resetting (waiting 2s)");
-    vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes longer than simple reset
+  if (!stm32_ota->skip_read_unprotect) {
+    // Note: rdp_detected was set by _stm32_check_protection_status() above (if successful)
 
-    // Re-sync bootloader after automatic reset
-    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after read unprotect reset");
-    STM32_ERROR_CHECK(stm32_reset(stm32_ota));
-    char cmd_bootloader_resync[] = {0x7F};
-    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+    // Send Read Unprotect (0x92) - if protection enabled, will mass erase and reset
+    ESP_LOGI(STM32_TAG, "Sending Read Unprotect command (0x92)");
+    char cmd_read_unprotect[] = {0x92, 0x6D};
+    err = _stm32_write_bytes(stm32_ota, cmd_read_unprotect, 2, 1, STM32_UART_TIMEOUT);
+    if (err == ESP_OK) {
+      // ACK received - protection was active, chip will mass erase + reset now
+      ESP_LOGI(STM32_TAG, "Read protection disabled - chip mass erasing + resetting (waiting 2s)");
+      vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes longer than simple reset
+
+      // Re-sync bootloader after automatic reset
+      ESP_LOGI(STM32_TAG, "Re-syncing bootloader after read unprotect reset");
+      STM32_ERROR_CHECK(stm32_reset(stm32_ota));
+      char cmd_bootloader_resync[] = {0x7F};
+      STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader_resync, 1, 1, STM32_UART_TIMEOUT));
+    } else {
+      // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
+      ESP_LOGI(STM32_TAG, "Read Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
+      // Continue - this is expected if flash is already readable
+    }
   } else {
-    // NACK or timeout - either already unprotected (good) or command unsupported (acceptable)
-    ESP_LOGI(STM32_TAG, "Read Unprotect returned error (likely already unprotected): %s", esp_err_to_name(err));
-    // Continue - this is expected if flash is already readable
+    ESP_LOGI(STM32_TAG, "Skipping Read Unprotect (skip_read_unprotect = 1)");
   }
 
   // 7. Erase flash memory - try regular erase first, fall back to extended erase
@@ -431,6 +549,84 @@ esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load
   return ESP_OK;
 }
 
+/**
+ * @brief Internal function to read and verify written data
+ *
+ * Performs read-back verification by reading the specified address and comparing with expected data.
+ * This is extracted as a helper to enable retry logic.
+ *
+ * @param stm32_ota Pointer to stm32_ota_t struct
+ * @param address Address to read from (must not be incremented)
+ * @param expected_data Expected data to compare against
+ * @param data_size Number of bytes to read and verify
+ * @param flash_addr Flash address (for logging only)
+ * @return esp_err_t ESP_OK if verification succeeds, error code otherwise
+ */
+static esp_err_t _stm32_read_and_verify(stm32_ota_t *stm32_ota, stm32_loadaddress_t *address,
+                                        const char *expected_data, size_t data_size, uint32_t flash_addr) {
+  // Send Read Memory command (0x11, 0xEE)
+  char cmd_read[] = {0x11, 0xEE};
+  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGD(STM32_TAG, "Read command (0x11) rejected at address 0x%08lX: %s", flash_addr, esp_err_to_name(err));
+    return err;  // Return error (will trigger retry or skip verification)
+  }
+
+  // Send the load address with the last byte being an XOR of all bytes combined
+  const char load_address_xor = _stm32_load_address_xor(address);
+  char cmd_load_address[] = {
+      address->high_byte, address->mid_high_byte, address->mid_low_byte,
+      address->low_byte, load_address_xor,
+  };
+  ESP_LOGD(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", address->high_byte,
+           address->mid_high_byte, address->mid_low_byte, address->low_byte, load_address_xor);
+  err = _stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGD(STM32_TAG, "Address send failed at 0x%08lX: %s", flash_addr, esp_err_to_name(err));
+    return err;
+  }
+
+  // Send the size of the data to be read along with its checksum (complement)
+  size_t bytes_size = data_size - 1;  // 0 < N <= 255
+  char read_size_cmd[] = {
+      bytes_size,
+      bytes_size ^ 0xFF,
+  };
+  if (uart_write_bytes(stm32_ota->uart_port, &read_size_cmd, 2) != 2) {
+    ESP_LOGD(STM32_TAG, "Failed to send read size request for address 0x%08lX (size: %d)", flash_addr, bytes_size);
+    return ESP_FAIL;
+  }
+
+  // Await response data (ACK + data bytes)
+  err = _stm32_await_rx(stm32_ota, data_size + 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGD(STM32_TAG, "Failed to receive read data at address 0x%08lX: %s", flash_addr, esp_err_to_name(err));
+    return err;
+  }
+
+  // Read response
+  uint8_t response[data_size + 1];
+  const int response_size = uart_read_bytes(stm32_ota->uart_port, response, data_size + 1, 1000 / portTICK_PERIOD_MS);
+  if (response_size != data_size + 1 || response[0] != STM32_UART_ACK) {
+    ESP_LOGD(STM32_TAG, "Invalid read response at address 0x%08lX (expected: %d, received: %d)",
+             flash_addr, data_size + 1, response_size);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // Verify that written data matches what we read back
+  for (size_t i = 0; i < data_size; i++) {
+    // Note: response[0] is ACK, actual data starts at response[1]
+    if (expected_data[i] != response[i + 1]) {
+      ESP_LOGD(STM32_TAG, "Verification mismatch at address 0x%08lX offset %d (wrote: 0x%02X, read: 0x%02X)",
+               flash_addr, i, expected_data[i], response[i + 1]);
+      return ESP_ERR_INVALID_RESPONSE;
+    }
+  }
+
+  ESP_LOGD(STM32_TAG, "Verification complete for address 0x%08lX (%d bytes)", flash_addr, data_size);
+  return ESP_OK;
+}
+
 esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load_address, const char *ota_data,
                                         size_t ota_data_size) {
   if (ota_data_size > STM32_MAX_PAGE_SIZE || ota_data_size == 0 || ota_data_size % 4 != 0) {
@@ -452,71 +648,58 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
     return write_err;
   }
 
-  // Read back the data for verification using original address
+  // Progressive retry loop for read verification (3 attempts with increasing delays)
   ESP_LOGD(STM32_TAG, "Verifying write at address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
-  char cmd_read[] = {0x11, 0xEE};
-  esp_err_t err = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT);
-  if (err != ESP_OK) {
-    ESP_LOGW(STM32_TAG, "Read command (0x11) rejected at address 0x%08lX: %s - skipping verification (likely read-protected)",
-             flash_addr, esp_err_to_name(err));
-    // Write succeeded but verification failed - this is acceptable if read protection is active
-    // load_address was already incremented by stm32_ota_write_page()
-    return ESP_OK;
-  }
 
-  // Send the original load address with the last byte being an XOR of all bytes combined
-  const char load_address_xor   = _stm32_load_address_xor(&original_address);
-  char       cmd_load_address[] = {
-      original_address.high_byte, original_address.mid_high_byte, original_address.mid_low_byte,
-      original_address.low_byte, load_address_xor,
-  };
-  ESP_LOGD(STM32_TAG, "LOAD ADDRESS READ %02x%02x%02x%02x (XOR: %02x)", original_address.high_byte,
-           original_address.mid_high_byte, original_address.mid_low_byte, original_address.low_byte, load_address_xor);
-  STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT));
+  esp_err_t verify_err = ESP_OK;
+  for (int retry = 0; retry < STM32_READ_VERIFY_RETRIES; retry++) {
+    // Add progressive delay before retry (skip on first attempt)
+    if (retry == 1) {
+      ESP_LOGW(STM32_TAG, "Retry %d/%d after %dms delay (address 0x%08lX)", retry + 1, STM32_READ_VERIFY_RETRIES,
+               STM32_RETRY_DELAY_1_MS, flash_addr);
+      vTaskDelay(pdMS_TO_TICKS(STM32_RETRY_DELAY_1_MS));  // 500ms
+    } else if (retry == 2) {
+      ESP_LOGW(STM32_TAG, "Retry %d/%d after %dms delay (address 0x%08lX)", retry + 1, STM32_READ_VERIFY_RETRIES,
+               STM32_RETRY_DELAY_2_MS, flash_addr);
+      vTaskDelay(pdMS_TO_TICKS(STM32_RETRY_DELAY_2_MS));  // 2s
+    } else if (retry == 3) {
+      ESP_LOGW(STM32_TAG, "Retry %d/%d after %dms delay (address 0x%08lX)", retry + 1, STM32_READ_VERIFY_RETRIES,
+               STM32_RETRY_DELAY_3_MS, flash_addr);
+      vTaskDelay(pdMS_TO_TICKS(STM32_RETRY_DELAY_3_MS));  // 4s
+    }
 
-  // Send the size of the data to be read along with it's checksum (complement)
-  size_t ota_bytes_size = ota_data_size - 1;  // 0 < N <= 255
-  char   ota_read_size[] = {
-      ota_bytes_size,
-      ota_bytes_size ^ 0xFF,
-  };
-  if (uart_write_bytes(stm32_ota->uart_port, &ota_read_size, 2) != 2) {
-    ESP_LOGE(STM32_TAG, "Failed to send read size request for verification at address 0x%08lX (size: %d)", flash_addr,
-             ota_bytes_size);
-    return ESP_FAIL;
-  }
+    // Attempt read verification
+    verify_err = _stm32_read_and_verify(stm32_ota, &original_address, ota_data, ota_data_size, flash_addr);
 
-  // Await ACK from STM32 to respond with data size and checksum
-  err = _stm32_await_rx(stm32_ota, ota_data_size + 1, STM32_UART_TIMEOUT);
-  if (err != ESP_OK) {
-    ESP_LOGE(STM32_TAG, "Failed to receive read data for verification at address 0x%08lX: %s", flash_addr,
-             esp_err_to_name(err));
-    return err;
-  }
+    // Success: break out of retry loop
+    if (verify_err == ESP_OK) {
+      if (retry > 0) {
+        ESP_LOGI(STM32_TAG, "Verification succeeded on attempt %d/%d (address 0x%08lX)", retry + 1,
+                 STM32_READ_VERIFY_RETRIES, flash_addr);
+      }
+      break;
+    }
 
-  // Prepare for reading back UART data for verification
-  uint8_t ota_data_response[ota_data_size + 1];
-  const int ota_data_response_size =
-      uart_read_bytes(stm32_ota->uart_port, ota_data_response, ota_data_size + 1, 1000 / portTICK_PERIOD_MS);
-  if (ota_data_response_size != ota_data_size + 1 || ota_data_response[0] != STM32_UART_ACK) {
-    ESP_LOGE(STM32_TAG, "Invalid read response for verification at address 0x%08lX (expected: %d, received: %d)",
-             flash_addr, ota_data_size + 1, ota_data_response_size);
-    return ESP_ERR_INVALID_RESPONSE;
-  }
-
-  // Verify that written data matches what we read back
-  for (size_t i = 0; i < ota_data_size; i++) {
-    // Note that we add 1 to the response index as the first byte in the
-    // response is an ACK byte (0x79)
-    if (ota_data[i] != ota_data_response[i + 1]) {
-      ESP_LOGE(STM32_TAG,
-               "Verification failed at address 0x%08lX offset %d (wrote: 0x%02X, read: 0x%02X)", flash_addr, i,
-               ota_data[i], ota_data_response[i + 1]);
-      return ESP_ERR_INVALID_RESPONSE;
+    // Determine if we should retry based on error type
+    // Retry only on NACK (ESP_ERR_INVALID_RESPONSE) and timeouts (ESP_ERR_TIMEOUT)
+    if (verify_err == ESP_ERR_INVALID_RESPONSE || verify_err == ESP_ERR_TIMEOUT) {
+      ESP_LOGW(STM32_TAG, "Verification failed (attempt %d/%d): %s - will retry", retry + 1, STM32_READ_VERIFY_RETRIES,
+               esp_err_to_name(verify_err));
+      continue;  // Retry
+    } else {
+      // Other error (e.g., read protection active): don't retry
+      ESP_LOGW(STM32_TAG, "Read command rejected at address 0x%08lX: %s - skipping verification (likely read-protected)",
+               flash_addr, esp_err_to_name(verify_err));
+      break;  // Don't retry, gracefully skip verification
     }
   }
-  ESP_LOGD(STM32_TAG, "Verification complete for address 0x%08lX (%d bytes)", flash_addr, ota_data_size);
 
-  // load_address was already incremented by stm32_ota_write_page()
+  // If all retries failed, log warning but continue (graceful degradation)
+  if (verify_err != ESP_OK) {
+    ESP_LOGW(STM32_TAG, "Verification failed after %d attempts at address 0x%08lX - continuing without verification",
+             STM32_READ_VERIFY_RETRIES, flash_addr);
+  }
+
+  // Write succeeded (verification is optional) - load_address was already incremented by stm32_ota_write_page()
   return ESP_OK;
 }

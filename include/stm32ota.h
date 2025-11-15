@@ -26,6 +26,12 @@
 // AN3155 Rev 19 states the max baudrate of the UART bootloader is 115200 baud
 #define STM32_MAX_BAUD_RATE 115200
 
+// Read verification retry configuration
+#define STM32_READ_VERIFY_RETRIES       3       // Number of retry attempts for read verification
+#define STM32_RETRY_DELAY_1_MS          500     // First retry delay: 500ms
+#define STM32_RETRY_DELAY_2_MS          2000    // Second retry delay: 2s
+#define STM32_RETRY_DELAY_3_MS          4000    // Third retry delay: 4s
+
 #define STM32_ERROR_CHECK(func)                                                                                        \
   {                                                                                                                    \
     esp_err_t err = func;                                                                                              \
@@ -60,6 +66,8 @@ typedef struct _stm32_ota_t {
   uart_port_t uart_port;              // UART port of the ESP to use
   uint8_t     disable_boot1_pin;      // Set to 1 if not using boot1_pin
   uint8_t     uart_externally_managed; // Set to 1 if UART is managed externally (shared with VCU protocol)
+  uint8_t     skip_read_unprotect;    // Set to 1 to skip read unprotect, 0 to auto-detect/attempt (default: 0)
+  uint8_t     skip_write_unprotect;   // Set to 1 to skip write unprotect, 0 to auto-detect/attempt (default: 0)
 } stm32_ota_t;
 
 typedef struct _stm32_loadaddress_t {
