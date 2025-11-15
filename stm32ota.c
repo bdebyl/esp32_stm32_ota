@@ -255,14 +255,14 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   }
 
   // 5. Disable write protection (required for flash write operations)
-  // Send Write Unprotect (0x73) - if protection enabled, will trigger system reset
+  // Send Write Unprotect (0x73) - if protection enabled, will mass erase + trigger system reset
   ESP_LOGI(STM32_TAG, "Sending Write Unprotect command (0x73)");
   char cmd_write_unprotect[] = {0x73, 0x8C};
   err = _stm32_write_bytes(stm32_ota, cmd_write_unprotect, 2, 1, STM32_UART_TIMEOUT);
   if (err == ESP_OK) {
-    // ACK received - protection was active, chip will reset now
-    ESP_LOGI(STM32_TAG, "Write protection disabled - chip resetting (waiting 500ms)");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // ACK received - protection was active, chip will mass erase + reset now
+    ESP_LOGI(STM32_TAG, "Write protection disabled - chip mass erasing + resetting (waiting 2s)");
+    vTaskDelay(pdMS_TO_TICKS(2000));  // Mass erase takes time
 
     // Re-sync bootloader after automatic reset
     ESP_LOGI(STM32_TAG, "Re-syncing bootloader after write unprotect reset");
@@ -297,6 +297,8 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   }
 
   // 7. Erase flash memory - try regular erase first, fall back to extended erase
+  // Note: If write/read protection was active, flash was already mass erased by steps 5-6
+  // This ensures flash is clean regardless of protection state
   ESP_LOGI(STM32_TAG, "Sending Erase command (0x43) - this may take several seconds");
   char cmd_erase[] = {0x43, 0xBC};
   err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT);
