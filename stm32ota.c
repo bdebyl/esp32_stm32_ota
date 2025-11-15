@@ -27,93 +27,6 @@ static char _stm32_load_address_xor(stm32_loadaddress_t *load_address) {
 }
 
 /**
- * @brief Internal function to check protection status via Get Version command (0x01)
- *
- * Attempts to detect Read Protection (RDP) and Write Protection (WRP) status by parsing
- * the Get Version command response. Per AN3155, some bootloaders return protection status
- * in the option bytes.
- *
- * @param stm32_ota Pointer to stm32_ota_t struct
- * @param rdp_active Pointer to uint8_t - set to 1 if RDP detected, 0 if not (output parameter)
- * @param wrp_active Pointer to uint8_t - set to 1 if WRP detected, 0 if not (output parameter)
- * @return esp_err_t ESP_OK if detection succeeded, ESP_FAIL if Get Version not supported or parsing failed
- */
-static esp_err_t _stm32_check_protection_status(stm32_ota_t *stm32_ota, uint8_t *rdp_active, uint8_t *wrp_active) {
-  // Send Get Version command (0x01, 0xFE)
-  ESP_LOGD(STM32_TAG, "Checking protection status via Get Version command (0x01)");
-  char cmd_get_version[] = {0x01, 0xFE};
-
-  // Flush UART before sending
-  esp_err_t err = uart_flush(stm32_ota->uart_port);
-  if (err != ESP_OK) {
-    ESP_LOGW(STM32_TAG, "UART flush failed before Get Version: %s", esp_err_to_name(err));
-    return ESP_FAIL;
-  }
-
-  // Send command
-  int bytes_written = uart_write_bytes(stm32_ota->uart_port, cmd_get_version, 2);
-  if (bytes_written != 2) {
-    ESP_LOGW(STM32_TAG, "Failed to write Get Version command");
-    return ESP_FAIL;
-  }
-
-  // Wait for response (ACK + N + version + option_byte1 + option_byte2 + ACK = 6 bytes min)
-  // Some bootloaders may return more option bytes, so we read up to 10 bytes
-  err = _stm32_await_rx(stm32_ota, 5, STM32_UART_TIMEOUT);
-  if (err != ESP_OK) {
-    ESP_LOGW(STM32_TAG, "Get Version command timeout or not supported: %s", esp_err_to_name(err));
-    return ESP_FAIL;
-  }
-
-  // Read response
-  uint8_t response[10];
-  int read_size = uart_read_bytes(stm32_ota->uart_port, response, 10, 1000 / portTICK_PERIOD_MS);
-
-  if (read_size < 5) {
-    ESP_LOGW(STM32_TAG, "Get Version response too short: %d bytes", read_size);
-    return ESP_FAIL;
-  }
-
-  // Validate first byte is ACK
-  if (response[0] != STM32_UART_ACK) {
-    ESP_LOGW(STM32_TAG, "Get Version did not return ACK: 0x%02x", response[0]);
-    return ESP_FAIL;
-  }
-
-  // Parse response: ACK + N + version + option_bytes...
-  uint8_t n = response[1];  // Number of bytes to follow
-  uint8_t version = response[2];
-
-  ESP_LOGD(STM32_TAG, "Bootloader version: 0x%02x, response length: %d", version, n);
-
-  // Initialize outputs to "not detected"
-  *rdp_active = 0;
-  *wrp_active = 0;
-
-  // Parse option bytes if available (bytes 3+)
-  // Note: Protection status encoding varies by bootloader version and chip family
-  // Conservative approach: check if option bytes suggest protection is active
-  if (read_size >= 4) {
-    uint8_t option_byte1 = response[3];
-
-    // Per AN3155, option byte 1 may contain RDP status
-    // Common encoding: 0xAA = unprotected, anything else = protected
-    // However, this varies by chip, so we use heuristics
-    if (option_byte1 != 0xAA && option_byte1 != 0x00) {
-      ESP_LOGD(STM32_TAG, "Option byte 1 suggests protection may be active: 0x%02x", option_byte1);
-      // Set rdp_active as a hint, but not definitive
-      *rdp_active = 1;
-    }
-  }
-
-  // Note: Write protection detection is chip-specific and not reliably detectable
-  // via Get Version on all bootloaders. We default to *wrp_active = 0 (attempt unprotect)
-
-  ESP_LOGD(STM32_TAG, "Protection status detection: RDP=%d, WRP=%d (heuristic)", *rdp_active, *wrp_active);
-  return ESP_OK;
-}
-
-/**
  * @brief Internal function to await (blocking) response of expected size on
  * UART buffer
  *
@@ -347,23 +260,7 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
   }
 
   // 5. Disable write protection (required for flash write operations)
-  // Check if we should skip write unprotect based on flags or detection
-  uint8_t wrp_detected = 0;
-  uint8_t rdp_detected = 0;
-
   if (!stm32_ota->skip_write_unprotect) {
-    // Attempt to detect protection status via Get Version command
-    esp_err_t detect_err = _stm32_check_protection_status(stm32_ota, &rdp_detected, &wrp_detected);
-
-    if (detect_err == ESP_OK) {
-      ESP_LOGI(STM32_TAG, "Protection detection succeeded - RDP: %s, WRP: %s",
-               rdp_detected ? "active" : "inactive", wrp_detected ? "active" : "inactive");
-    } else {
-      ESP_LOGW(STM32_TAG, "Protection detection unavailable - will attempt unprotect commands");
-      // Fall back to attempting unprotect (conservative approach)
-      wrp_detected = 0;  // Unknown, so attempt unprotect
-    }
-
     // Send Write Unprotect (0x73) - if protection enabled, will mass erase + trigger system reset
     ESP_LOGI(STM32_TAG, "Sending Write Unprotect command (0x73)");
     char cmd_write_unprotect[] = {0x73, 0x8C};
@@ -389,8 +286,6 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
 
   // 6. Disable read protection (required for READ command during write verification)
   if (!stm32_ota->skip_read_unprotect) {
-    // Note: rdp_detected was set by _stm32_check_protection_status() above (if successful)
-
     // Send Read Unprotect (0x92) - if protection enabled, will mass erase and reset
     ESP_LOGI(STM32_TAG, "Sending Read Unprotect command (0x92)");
     char cmd_read_unprotect[] = {0x92, 0x6D};
