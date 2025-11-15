@@ -246,28 +246,26 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
     return err;
   }
 
-  // 5.0.1. Set STM32 to write and read unprotected, note that read unprotect
-  // (RPUN) does a mass erase
-  // TODO: do something with response information
-  // char cmd_wpun[] = {0x73, 0x8C};
-  // ESP_LOGD(STM32_TAG, "WPUN send");
-  // STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_wpun, 2, 2));
-  // ESP_LOGD(STM32_TAG, "WPUN success");
-  // vTaskDelay(200 / portTICK_PERIOD_MS);
+  // 5. Disable read protection (required for READ command during write verification)
+  // Send Read Unprotect (0x92) - if protection enabled, will mass erase and reset
+  ESP_LOGI(STM32_TAG, "Sending Read Unprotect command (0x92)");
+  char cmd_read_unprotect[] = {0x92, 0x6D};
+  err = _stm32_write_bytes(stm32_ota, cmd_read_unprotect, 2, 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    ESP_LOGW(STM32_TAG, "Read Unprotect command failed: %s (may already be unprotected)", esp_err_to_name(err));
+    // Continue - if already unprotected, this is expected
+  } else {
+    ESP_LOGI(STM32_TAG, "Read Unprotect successful - waiting for system reset");
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-  // Write unprotect triggers a system reset requiring bootloader re-init
-  // STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1));
+    // Re-sync bootloader after reset
+    ESP_LOGI(STM32_TAG, "Re-syncing bootloader after read unprotect");
+    STM32_ERROR_CHECK(stm32_reset(stm32_ota));
+    char cmd_bootloader[] = {0x7F};
+    STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1, STM32_UART_TIMEOUT));
+  }
 
-  // char cmd_rpun[] = {0x92, 0x6D};
-  // ESP_LOGD(STM32_TAG, "RPUN send");
-  // STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_rpun, 2, 2));
-  // ESP_LOGD(STM32_TAG, "RPUN success");
-  // vTaskDelay(500 / portTICK_PERIOD_MS);
-
-  // Read unprotect triggers a system reset requiring bootloader re-init
-  // STM32_ERROR_CHECK(_stm32_write_bytes(stm32_ota, cmd_bootloader, 1, 1));
-
-  // 5. Erase flash memory - try regular erase first, fall back to extended erase
+  // 6. Erase flash memory - try regular erase first, fall back to extended erase
   ESP_LOGI(STM32_TAG, "Sending Erase command (0x43) - this may take several seconds");
   char cmd_erase[] = {0x43, 0xBC};
   err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT);
