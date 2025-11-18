@@ -21,6 +21,10 @@
 #define STM32_UART_ACK      0x79
 #define STM32_UART_NACK     0x1F  // Bootloader rejection (invalid cmd, checksum error, protection active, etc.)
 
+// Flags for _stm32_write_bytes behavior
+#define STM32_WRITE_FLAG_NONE           0x00  // Default: NACK is an error
+#define STM32_WRITE_FLAG_NACK_OK        0x01  // NACK is acceptable (log as debug, not error)
+
 #define STM32_MAX_PAGE_SIZE 0xFF
 
 // AN3155 Rev 19 states the max baudrate of the UART bootloader is 115200 baud
