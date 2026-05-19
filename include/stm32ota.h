@@ -72,6 +72,16 @@ typedef struct _stm32_ota_t {
   uint8_t     uart_externally_managed; // Set to 1 if UART is managed externally (shared with VCU protocol)
   uint8_t     skip_read_unprotect;    // Set to 1 to skip read unprotect, 0 to auto-detect/attempt (default: 0)
   uint8_t     skip_write_unprotect;   // Set to 1 to skip write unprotect, 0 to auto-detect/attempt (default: 0)
+  // SKUDAK: per-sector erase list, used in stm32_ota_begin step 7. When
+  // erase_sector_count == 0 (or erase_sectors == NULL), falls back to the
+  // legacy global mass-erase for backward compatibility. When non-zero, the
+  // listed sectors are erased and ALL other sectors are preserved across
+  // the OTA. Use this to keep EEPROM emulation slots, telemetry blobs,
+  // future feature regions intact through firmware updates. Max 255 sectors
+  // (AN3155 per-sector Erase command cap). Sector numbers > 255 require
+  // Extended Erase (0x44), which this library also supports automatically.
+  const uint16_t *erase_sectors;       // Pointer to caller-owned sector list (must outlive stm32_ota_begin)
+  uint16_t        erase_sector_count;  // Number of entries in erase_sectors; 0 = legacy global mass-erase
 } stm32_ota_t;
 
 typedef struct _stm32_loadaddress_t {
