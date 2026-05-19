@@ -315,41 +315,127 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota) {
     ESP_LOGI(STM32_TAG, "Skipping Read Unprotect (skip_read_unprotect = 1)");
   }
 
-  // 7. Erase flash memory - try regular erase first, fall back to extended erase
-  // Note: If write/read protection was active, flash was already mass erased by steps 5-6
-  // This ensures flash is clean regardless of protection state
-  ESP_LOGI(STM32_TAG, "Probing for Erase command (0x43) support");
-  char cmd_erase[] = {0x43, 0xBC};
-  err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NACK_OK);
-  if (err == ESP_OK) {
-    // Regular erase is supported, send global erase command
-    ESP_LOGI(STM32_TAG, "Regular Erase supported - sending global erase command (may take up to 60 seconds)");
-    char cmd_erase_global[] = {0xFF, 0x00};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_global, 2, 1, STM32_UART_TIMEOUT_EXTENDED, STM32_WRITE_FLAG_NONE);
-    if (err != ESP_OK) {
-      ESP_LOGE(STM32_TAG, "Failed to execute global erase: %s", esp_err_to_name(err));
-      return err;
+  // 7. Erase application-code flash sectors only.
+  //
+  // SKUDAK: previously this issued a GLOBAL mass-erase (0xFF 0x00 for Erase,
+  // 0xFF 0xFF for Extended Erase) which wiped every sector on the chip,
+  // including those holding the application's EEPROM emulation. Every OTA
+  // therefore reset the user's persisted config (charge limit, drive mode,
+  // VIN, serial, etc.) back to factory defaults. The fix: enumerate the
+  // app-code sectors explicitly and pass them as the AN3155 per-sector list.
+  // Any sectors past the app footprint (used for EEPROM, telemetry, future
+  // features) are left untouched.
+  //
+  // The sector list is provided by the caller via stm32_ota->erase_sectors
+  // (NULL terminator: erase_sector_count == 0 falls back to legacy global
+  // erase for backward compatibility with consumers that haven't migrated).
+  //
+  // For Skudak's STM32F413xG layout (SKUDAK-513), the app lives in sectors
+  // 0..4 (128 KB total). Sectors 5+6 hold EEPROM_A/EEPROM_B ping-pong slots.
+  // Preserving them across OTA is the whole point of this change.
+  if (stm32_ota->erase_sector_count == 0) {
+    // Legacy path — global mass-erase. Wipes everything.
+    ESP_LOGW(STM32_TAG,
+             "No erase_sectors configured — falling back to global mass erase. "
+             "Application EEPROM (if any) will be lost.");
+    ESP_LOGI(STM32_TAG, "Probing for Erase command (0x43) support");
+    char cmd_erase[] = {0x43, 0xBC};
+    err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NACK_OK);
+    if (err == ESP_OK) {
+      ESP_LOGI(STM32_TAG, "Regular Erase supported - sending global erase command (may take up to 60 seconds)");
+      char cmd_erase_global[] = {0xFF, 0x00};
+      err = _stm32_write_bytes(stm32_ota, cmd_erase_global, 2, 1, STM32_UART_TIMEOUT_EXTENDED, STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to execute global erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Global erase completed successfully");
+    } else {
+      ESP_LOGI(STM32_TAG, "Regular Erase not supported (expected NACK) - using Extended Erase command (0x44)");
+      char cmd_erase_ext[] = {0x44, 0xBB};
+      err = _stm32_write_bytes(stm32_ota, cmd_erase_ext, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to initiate extended erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Sending mass erase instruction (may take up to 60 seconds)");
+      char cmd_erase_ext_mass[] = {0xFF, 0xFF, 0x00};
+      err = _stm32_write_bytes(stm32_ota, cmd_erase_ext_mass, 3, 1, STM32_UART_TIMEOUT_EXTENDED, STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to execute mass erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Extended mass erase completed successfully");
     }
-    ESP_LOGI(STM32_TAG, "Global erase completed successfully");
   } else {
-    // Regular erase not supported (NACK expected), try extended erase (for chips with >256 pages)
-    ESP_LOGI(STM32_TAG, "Regular Erase not supported (expected NACK) - using Extended Erase command (0x44)");
-    char cmd_erase_ext[] = {0x44, 0xBB};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NONE);
-    if (err != ESP_OK) {
-      ESP_LOGE(STM32_TAG, "Failed to initiate extended erase: %s", esp_err_to_name(err));
-      return err;
+    // Per-sector erase — preserves sectors not in the list (e.g. EEPROM).
+    const uint16_t sector_count = stm32_ota->erase_sector_count;
+    if (sector_count > 255) {
+      // Per-sector Erase (0x43) capped at 256 entries; Extended Erase (0x44)
+      // would handle more, but we don't need that depth — keep it simple.
+      ESP_LOGE(STM32_TAG, "erase_sector_count=%u exceeds 255 — refusing OTA", sector_count);
+      return ESP_ERR_INVALID_ARG;
     }
-
-    // Send mass erase instruction (may take up to 60 seconds for large flash)
-    ESP_LOGI(STM32_TAG, "Sending mass erase instruction (may take up to 60 seconds)");
-    char cmd_erase_ext_mass[] = {0xFF, 0xFF, 0x00};
-    err = _stm32_write_bytes(stm32_ota, cmd_erase_ext_mass, 3, 1, STM32_UART_TIMEOUT_EXTENDED, STM32_WRITE_FLAG_NONE);
-    if (err != ESP_OK) {
-      ESP_LOGE(STM32_TAG, "Failed to execute mass erase: %s", esp_err_to_name(err));
-      return err;
+    ESP_LOGI(STM32_TAG, "Probing for Erase command (0x43) support");
+    char cmd_erase[] = {0x43, 0xBC};
+    err = _stm32_write_bytes(stm32_ota, cmd_erase, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NACK_OK);
+    if (err == ESP_OK) {
+      // Per-sector Erase (0x43): one byte N (= count-1), N+1 sector bytes,
+      // XOR checksum. Limited to sector numbers <= 255.
+      ESP_LOGI(STM32_TAG, "Regular Erase supported - issuing per-sector erase (%u sectors)", sector_count);
+      // 1 (N) + sector_count (list) + 1 (checksum)
+      char payload[1 + 255 + 1];
+      payload[0]    = (uint8_t)(sector_count - 1);
+      uint8_t cksum = (uint8_t)payload[0];
+      for (uint16_t i = 0; i < sector_count; i++) {
+        const uint8_t s = stm32_ota->erase_sectors[i];
+        payload[1 + i] = (char)s;
+        cksum ^= s;
+      }
+      payload[1 + sector_count] = (char)cksum;
+      err = _stm32_write_bytes(stm32_ota, payload, (size_t)(1 + sector_count + 1), 1, STM32_UART_TIMEOUT_EXTENDED,
+                               STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to execute per-sector erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Per-sector erase completed successfully (non-listed sectors preserved)");
+    } else {
+      // Per-sector Extended Erase (0x44): 2-byte N (BE), 2*(N+1) sector bytes
+      // (each BE uint16), XOR checksum of all preceding bytes.
+      ESP_LOGI(STM32_TAG, "Regular Erase not supported (expected NACK) - using Extended Erase (0x44) per-sector mode");
+      char cmd_erase_ext[] = {0x44, 0xBB};
+      err = _stm32_write_bytes(stm32_ota, cmd_erase_ext, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to initiate extended erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Sending per-sector erase list (%u sectors)", sector_count);
+      // 2 (N) + 2*sector_count (list) + 1 (checksum). Worst case 2 + 510 + 1 = 513;
+      // sized for the 255-sector cap above.
+      char payload[2 + 2 * 255 + 1];
+      const uint16_t N = (uint16_t)(sector_count - 1);
+      payload[0]       = (char)(uint8_t)(N >> 8);
+      payload[1]       = (char)(uint8_t)(N & 0xFF);
+      uint8_t cksum    = (uint8_t)payload[0] ^ (uint8_t)payload[1];
+      for (uint16_t i = 0; i < sector_count; i++) {
+        const uint16_t s  = stm32_ota->erase_sectors[i];
+        const uint8_t  hi = (uint8_t)(s >> 8);
+        const uint8_t  lo = (uint8_t)(s & 0xFF);
+        payload[2 + 2 * i]     = (char)hi;
+        payload[2 + 2 * i + 1] = (char)lo;
+        cksum ^= hi;
+        cksum ^= lo;
+      }
+      payload[2 + 2 * sector_count] = (char)cksum;
+      err = _stm32_write_bytes(stm32_ota, payload, (size_t)(2 + 2 * sector_count + 1), 1, STM32_UART_TIMEOUT_EXTENDED,
+                               STM32_WRITE_FLAG_NONE);
+      if (err != ESP_OK) {
+        ESP_LOGE(STM32_TAG, "Failed to execute per-sector extended erase: %s", esp_err_to_name(err));
+        return err;
+      }
+      ESP_LOGI(STM32_TAG, "Per-sector extended erase completed successfully (non-listed sectors preserved)");
     }
-    ESP_LOGI(STM32_TAG, "Extended mass erase completed successfully");
   }
 
   ESP_LOGI(STM32_TAG, "STM32 bootloader initialization complete, ready for firmware write");
