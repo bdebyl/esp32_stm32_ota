@@ -550,6 +550,38 @@ esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load
  * @param flash_addr Flash address (for logging only)
  * @return esp_err_t ESP_OK if verification succeeds, error code otherwise
  */
+esp_err_t stm32_ota_read(stm32_ota_t *stm32_ota, const stm32_loadaddress_t *address, uint8_t *out, size_t size) {
+  if (stm32_ota == NULL || address == NULL || out == NULL || size == 0 || size > 256) {
+    return ESP_ERR_INVALID_SIZE;
+  }
+  char      cmd_read[] = {0x11, 0xEE};
+  esp_err_t err        = _stm32_write_bytes(stm32_ota, cmd_read, 2, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NONE);
+  if (err != ESP_OK) {
+    return err;
+  }
+  stm32_loadaddress_t copy             = *address;
+  const char          load_address_xor = _stm32_load_address_xor(&copy);
+  char cmd_load_address[] = {copy.high_byte, copy.mid_high_byte, copy.mid_low_byte, copy.low_byte, load_address_xor};
+  err = _stm32_write_bytes(stm32_ota, cmd_load_address, 5, 1, STM32_UART_TIMEOUT, STM32_WRITE_FLAG_NONE);
+  if (err != ESP_OK) {
+    return err;
+  }
+  char read_size_cmd[] = {(char)(size - 1), (char)((size - 1) ^ 0xFF)};
+  if (uart_write_bytes(stm32_ota->uart_port, read_size_cmd, 2) != 2) {
+    return ESP_FAIL;
+  }
+  err = _stm32_await_rx(stm32_ota, size + 1, STM32_UART_TIMEOUT);
+  if (err != ESP_OK) {
+    return err;
+  }
+  uint8_t ack = 0;
+  if (uart_read_bytes(stm32_ota->uart_port, &ack, 1, pdMS_TO_TICKS(1000)) != 1 || ack != STM32_UART_ACK) {
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+  return (uart_read_bytes(stm32_ota->uart_port, out, size, pdMS_TO_TICKS(1000)) == (int)size) ? ESP_OK
+                                                                                                 : ESP_ERR_TIMEOUT;
+}
+
 static esp_err_t _stm32_read_and_verify(stm32_ota_t *stm32_ota, stm32_loadaddress_t *address,
                                         const char *expected_data, size_t data_size, uint32_t flash_addr) {
   // Send Read Memory command (0x11, 0xEE)
@@ -607,7 +639,7 @@ static esp_err_t _stm32_read_and_verify(stm32_ota_t *stm32_ota, stm32_loadaddres
     if (expected_data[i] != response[i + 1]) {
       ESP_LOGD(STM32_TAG, "Verification mismatch at address 0x%08lX offset %d (wrote: 0x%02X, read: 0x%02X)",
                flash_addr, i, expected_data[i], response[i + 1]);
-      return ESP_ERR_INVALID_RESPONSE;
+      return ESP_ERR_INVALID_CRC;  // the flash holds other data: never "verified"
     }
   }
 
@@ -666,7 +698,7 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
 
     // Determine if we should retry based on error type
     // Retry only on NACK (ESP_ERR_INVALID_RESPONSE) and timeouts (ESP_ERR_TIMEOUT)
-    if (verify_err == ESP_ERR_INVALID_RESPONSE || verify_err == ESP_ERR_TIMEOUT) {
+    if (verify_err == ESP_ERR_INVALID_RESPONSE || verify_err == ESP_ERR_TIMEOUT || verify_err == ESP_ERR_INVALID_CRC) {
       ESP_LOGW(STM32_TAG, "Verification failed (attempt %d/%d): %s - will retry", retry + 1, STM32_READ_VERIFY_RETRIES,
                esp_err_to_name(verify_err));
       continue;  // Retry
@@ -678,7 +710,15 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
     }
   }
 
-  // If all retries failed, log warning but continue (graceful degradation)
+  // Read back, but different from what was written: the page did not program. That is a failed write, not a
+  // verification we can skip.
+  if (verify_err == ESP_ERR_INVALID_CRC) {
+    ESP_LOGE(STM32_TAG, "Flash at 0x%08lX does not hold the data written after %d attempts", flash_addr,
+             STM32_READ_VERIFY_RETRIES);
+    return ESP_ERR_INVALID_CRC;
+  }
+
+  // The read itself kept failing (read protection, timeouts): log it and continue (graceful degradation)
   if (verify_err != ESP_OK) {
     ESP_LOGW(STM32_TAG, "Verification failed after %d attempts at address 0x%08lX - continuing without verification",
              STM32_READ_VERIFY_RETRIES, flash_addr);
