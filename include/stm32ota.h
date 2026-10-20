@@ -134,6 +134,20 @@ esp_err_t stm32_ota_begin(stm32_ota_t *stm32_ota);
  */
 esp_err_t stm32_ota_end(stm32_ota_t *stm32_ota);
 /**
+ * @brief Reads up to 256 bytes of STM32 memory with the bootloader's Read Memory command (0x11).
+ *
+ * stm32_ota_begin must be called first. Use it to verify a whole image after writing it, rather than reading back
+ * between writes.
+ *
+ * @param stm32_ota
+ * @param address Start address (not changed)
+ * @param out Destination, size bytes
+ * @param size 1 to 256 bytes
+ * @return esp_err_t ESP_OK, ESP_ERR_INVALID_SIZE, a bootloader NACK (ESP_ERR_INVALID_RESPONSE) or ESP_ERR_TIMEOUT
+ */
+esp_err_t stm32_ota_read(stm32_ota_t *stm32_ota, const stm32_loadaddress_t *address, uint8_t *out, size_t size);
+
+/**
  * @brief Writes a page of byte data to the STM32 without read verification.
  *
  * Use this when read protection prevents verification or when speed is critical.
