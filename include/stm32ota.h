@@ -16,8 +16,8 @@
 #define STM32_HIGH          1
 #define STM32_LOW           0
 
-#define STM32_UART_TIMEOUT  0x00FFFFFF  // ~16 seconds (for normal operations)
-#define STM32_UART_TIMEOUT_EXTENDED  0x0FFFFFFF  // ~70 seconds (for mass erase)
+#define STM32_UART_TIMEOUT  16000U  // milliseconds: normal bootloader commands
+#define STM32_UART_TIMEOUT_EXTENDED  70000U  // milliseconds: mass and sector erase
 #define STM32_UART_ACK      0x79
 #define STM32_UART_NACK     0x1F  // Bootloader rejection (invalid cmd, checksum error, protection active, etc.)
 
@@ -34,7 +34,6 @@
 #define STM32_READ_VERIFY_RETRIES       3       // Number of retry attempts for read verification
 #define STM32_RETRY_DELAY_1_MS          500     // First retry delay: 500ms
 #define STM32_RETRY_DELAY_2_MS          2000    // Second retry delay: 2s
-#define STM32_RETRY_DELAY_3_MS          4000    // Third retry delay: 4s
 
 #define STM32_ERROR_CHECK(func)                                                                                        \
   {                                                                                                                    \
