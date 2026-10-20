@@ -32,7 +32,7 @@ static char _stm32_load_address_xor(stm32_loadaddress_t *load_address) {
  *
  * @param stm32_ota
  * @param expected_size
- * @param timeout Maximum timeout iterations (use STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
+ * @param timeout Timeout in milliseconds (STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
  * @return esp_err_t
  */
 static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size, uint32_t timeout) {
@@ -79,7 +79,7 @@ static esp_err_t _stm32_await_rx(stm32_ota_t *stm32_ota, size_t expected_size, u
  * @param write_bytes
  * @param write_size
  * @param response_size
- * @param timeout Maximum timeout iterations (use STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
+ * @param timeout Timeout in milliseconds (STM32_UART_TIMEOUT or STM32_UART_TIMEOUT_EXTENDED)
  * @param flags Behavior flags (STM32_WRITE_FLAG_NONE or STM32_WRITE_FLAG_NACK_OK)
  * @return esp_err_t
  */
@@ -517,7 +517,8 @@ esp_err_t stm32_ota_write_page(stm32_ota_t *stm32_ota, stm32_loadaddress_t *load
 
   // Validate we received the ACK indicating successful memory write operation
   uint8_t   response      = 0x00;
-  const int received_size = uart_read_bytes(stm32_ota->uart_port, &response, 1, STM32_UART_TIMEOUT);
+  // The byte is already buffered (awaited above); the timeout is in ticks, not milliseconds
+  const int received_size = uart_read_bytes(stm32_ota->uart_port, &response, 1, pdMS_TO_TICKS(1000));
 
   if (received_size == 0) {
     ESP_LOGE(STM32_TAG, "Timeout waiting for write ACK at address 0x%08lX", flash_addr);
@@ -649,10 +650,6 @@ esp_err_t stm32_ota_write_page_verified(stm32_ota_t *stm32_ota, stm32_loadaddres
       ESP_LOGW(STM32_TAG, "Retry %d/%d after %dms delay (address 0x%08lX)", retry + 1, STM32_READ_VERIFY_RETRIES,
                STM32_RETRY_DELAY_2_MS, flash_addr);
       vTaskDelay(pdMS_TO_TICKS(STM32_RETRY_DELAY_2_MS));  // 2s
-    } else if (retry == 3) {
-      ESP_LOGW(STM32_TAG, "Retry %d/%d after %dms delay (address 0x%08lX)", retry + 1, STM32_READ_VERIFY_RETRIES,
-               STM32_RETRY_DELAY_3_MS, flash_addr);
-      vTaskDelay(pdMS_TO_TICKS(STM32_RETRY_DELAY_3_MS));  // 4s
     }
 
     // Attempt read verification
